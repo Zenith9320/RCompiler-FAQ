@@ -49,13 +49,6 @@ class ASTNode {
 };
 
 /*
-class of statements
-*/
-class StatementNode : ASTNode {
-
-};
-
-/*
 class of expression
 */
 class ExpressionNode : ASTNode {
@@ -565,5 +558,61 @@ class GenParaNode : public TypeNode {
   std::vector<std::unique_ptr<GenericParam>> generic_params;
 
   GenParaNode(std::vector<std::unique_ptr<GenericParam>> gp, int l, int c) : generic_params(std::move(gp)), TypeNode(NodeType::GenPara, l, c) {};
+};
+
+
+/*
+class of statements
+*/
+
+//LetStatement → OuterAttribute* let PatternNoTopAlt ( : Type )? ( = Expression | = Expressionexcept LazyBooleanExpression or end with a } else BlockExpression)? ;
+class LetStatement {
+
+};
+
+//ExpressionStatement → ExpressionWithoutBlock ; | ExpressionWithBlock ;?
+class ExpressionStatement {
+
+};
+
+//Statement →  ; | Item  | LetStatement | ExpressionStatement
+class StatementNode : ASTNode {
+ public:
+  enum StatementType {
+    SEMICOLON, ITEM, LETSTATEMENT, EXPRESSIONSTATEMENT
+  };
+  StatementType type;
+  std::optional<std::unique_ptr<TypeNode>> item = std::nullopt; //item
+  std::optional<std::unique_ptr<LetStatement>> let_statement = std::nullopt; //letstatement
+  std::optional<std::unique_ptr<ExpressionStatement>> expr_statement = std::nullopt; //ExpressionStatement
+  bool check() {
+    switch (type) {
+      case(SEMICOLON) : {
+        if (item == std::nullopt && let_statement == std::nullopt && expr_statement == std::nullopt) {
+          return true;
+        }
+        return false;
+      }
+      case(ITEM) : {
+        if (item != std::nullopt && let_statement == std::nullopt && expr_statement == std::nullopt) {
+          return true;
+        }
+        return false;
+      }
+      case(LETSTATEMENT) : {
+        if (item == std::nullopt && let_statement != std::nullopt && expr_statement == std::nullopt) {
+          return true;
+        }
+        return false;
+      }
+      case(EXPRESSIONSTATEMENT) : {
+        if (item == std::nullopt && let_statement == std::nullopt && expr_statement != std::nullopt) {
+          return true;
+        }
+        return false;
+      }
+      default: return false;
+    }
+  };
 };
 #endif
