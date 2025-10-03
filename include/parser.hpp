@@ -6,6 +6,7 @@
 #include <variant>
 #include <optional>
 #include <unordered_set>
+#include "lexer.hpp"
 
 using ItemType = std::variant<
     std::unique_ptr<ModuleNode>,
@@ -42,7 +43,7 @@ enum NodeType {
   ExpressionWithoutBlock, OperatorExpression, BorrowExpression, DereferenceExpression, NegationExpression, ArithmeticOrLogicalExpression, ComparisonExpression, LazyBooleanExpression,
   TypeCastExpression, AssignmentExpression, CompoundAssignmentExpression, GroupedExpression, ArrayExpression, IndexExpression, TupleExpression, TupeIndexingExpression, StructExpression,
   CallExpression, MethodCallExpression, FieldExpression, InfiniteLoopExpression, PredicateLoopExpression, LoopExpression, IfExpression, MatchExpression, ReturnExpression, UnderscoreExpression,
-  ParenthesizedType, TypePath_node, TupleType, NeverType, ArrayType, SliceType, InferredType, QualifiedPathInType
+  ParenthesizedType, TypePath_node, TupleType, NeverType, ArrayType, SliceType, InferredType, QualifiedPathInType, Statement, PathExpression
 };
 
 //rust中的数据类型
@@ -114,7 +115,6 @@ class ASTNode {
   int row, col;
   ASTNode(NodeType t, int r, int c) : type(t), row(r), col(c) {}
   virtual ~ASTNode() = default;
-  virtual void print(int indent = 0) const = 0;
 };
 
 /*
@@ -125,6 +125,10 @@ class ExpressionNode : ASTNode {
   ExpressionNode(NodeType t, int l, int c) : ASTNode(t, l, c) {};
 
   NodeType get_type() { return type; }
+
+  int get_l() { return row; }
+
+  int get_c() { return col; }
 
   virtual ~ExpressionNode() = default;
 };
@@ -146,7 +150,7 @@ class TypeNode : ASTNode {
 };
 
 //ParenthesizedType → ( Type )
-class ParenthesizedTypeNode : TypeNode {
+class ParenthesizedTypeNode : public TypeNode {
  public:
   std::unique_ptr<TypeNode> type;
 
@@ -154,7 +158,7 @@ class ParenthesizedTypeNode : TypeNode {
 };  
 
 //TypePath → ::? TypePathSegment ( :: TypePathSegment )*
-class TypePathNode : TypeNode {
+class TypePathNode : public TypeNode {
  public:
   std::unique_ptr<TypePath> type_path;
 
@@ -162,7 +166,7 @@ class TypePathNode : TypeNode {
 };
 
 //TupleType → ( ) | ( ( Type , )+ Type? )
-class TupleTypeNode : TypeNode {
+class TupleTypeNode : public TypeNode {
  public:
   std::vector<std::unique_ptr<TypeNode>> types;
 
@@ -170,13 +174,13 @@ class TupleTypeNode : TypeNode {
 };  
 
 //NeverType → !
-class NeverTypeNode : TypeNode { 
+class NeverTypeNode : public TypeNode { 
  public:
   NeverTypeNode(int l, int c) : TypeNode(NodeType::NeverType, l, c) {};
 };
 
 //ArrayType → [ Type ; Expression ]
-class ArrayTypeNode : TypeNode {
+class ArrayTypeNode : public TypeNode {
  public:
   std::unique_ptr<TypeNode> type;
   std::unique_ptr<ExpressionNode> expression;
@@ -186,7 +190,7 @@ class ArrayTypeNode : TypeNode {
 };
 
 //SliceType → [ Type ]
-class SliceTypeNode : TypeNode {
+class SliceTypeNode : public TypeNode {
  public:
   std::unique_ptr<TypeNode> type;
 
@@ -194,14 +198,14 @@ class SliceTypeNode : TypeNode {
 };
 
 //InferredType → _
-class InferredTypeNode : TypeNode { 
+class InferredTypeNode : public TypeNode { 
  public:
   InferredTypeNode(int l, int c) : TypeNode(NodeType::InferredType, l, c) {};
 };
 
 //QualifiedPathInType → QualifiedPathType ( :: TypePathSegment )+
 //QualifiedPathType → < Type ( as TypePath )? >
-class QualifiedPathInTypeNode : TypeNode {
+class QualifiedPathInTypeNode : public TypeNode {
  public:
   std::unique_ptr<TypeNode> type;
   std::unique_ptr<TypePath> type_path;
@@ -238,49 +242,48 @@ class InnerAttributeNode : ASTNode {
 
 /*
 1.  mod ID ;
-2.  mod ID { InnerAttributes, items }
+2.  mod ID { items }
 */
-class ModuleNode : ItemNode {
+class ModuleNode : public ItemNode {
  public:
   std::string id;
   bool isDeclaration;
 
-  std::vector<InnerAttributeNode> InnerAttributes;
+  //std::vector<InnerAttributeNode> InnerAttributes;
   std::vector<ItemType> items;
 
   ModuleNode(std::string i, int l, int c) : ItemNode(NodeType::Module, l ,c) {
     id = i;
-  }; //声明式module
+  };
 
-  ModuleNode(std::string , int l, int c, std::vector<InnerAttributeNode> InnerAttribute, std::vector<ItemType> item)
-            : ItemNode(NodeType::Module, l, c), InnerAttributes(std::move(InnerAttribute)), items(std::move(item)) {};
+  ModuleNode(std::string i, int l, int c, std::vector<ItemType> item)
+            : id(i), ItemNode(NodeType::Module, l, c), items(std::move(item)) {};
 };
 
 /*
 structs used in function node
 */
 //const? async?​ ItemSafety?​ ( extern Abi? )?
+enum class ItemSafety { None, Safe, Unsafe };
 struct FunctionQualifier {
   bool is_const = false;
   bool is_async = false;
-  enum class Safety { None, Safe, Unsafe };
-  Safety safety = Safety::None;
+  bool is_unsafe = false;
   bool has_extern = false;        
   std::optional<std::string> abi = std::nullopt; 
 
   FunctionQualifier() = default;
 
-  FunctionQualifier(bool c, bool a, Safety s, bool e, std::optional<std::string> abi_str)
-      : is_const(c), is_async(a), safety(s), has_extern(e), abi(std::move(abi_str)) {}
+  FunctionQualifier(bool c, bool a, bool s, bool e, std::optional<std::string> abi_str)
+      : is_const(c), is_async(a), is_unsafe(s), has_extern(e), abi(std::move(abi_str)) {}
 };
 
-//( & | & Lifetime )? mut? self
+//&? mut? self
 struct ShorthandSelf {
   bool if_prefix = false; //是否有( & | & Lifetime )
-  std::optional<Lifetime> lifetime;
   bool if_mut = false;
 
-  ShorthandSelf(std::string s, bool im) : if_prefix(true), lifetime(Lifetime(s)), if_mut(im) {};
+  ShorthandSelf(bool ip, bool im) : if_prefix(ip), if_mut(im) {};
 };
 
 //mut? self : Type
@@ -291,13 +294,13 @@ struct TypedSelf {
   TypedSelf(bool im, std::unique_ptr<TypeNode> t) : if_mut(im), type(std::move(t)) {};
 };
 
-//OuterAttribute* ( ShorthandSelf | TypedSelf )
+//( ShorthandSelf | TypedSelf )
 struct SelfParam {
-  std::vector<OuterAttributeNode> outer_attributes;
+  //std::vector<OuterAttributeNode> outer_attributes;
   std::variant<std::unique_ptr<ShorthandSelf>, std::unique_ptr<TypedSelf>> self;
 
-  SelfParam(std::vector<OuterAttributeNode> oa, std::unique_ptr<ShorthandSelf> s) : outer_attributes(std::move(oa)), self(std::move(s)) {};
-  SelfParam(std::vector<OuterAttributeNode> oa, std::unique_ptr<TypedSelf> s) : outer_attributes(std::move(oa)), self(std::move(s)) {};
+  SelfParam(std::unique_ptr<ShorthandSelf> s) : self(std::move(s)) {};
+  SelfParam(std::unique_ptr<TypedSelf> s) : self(std::move(s)) {};
 };
 
 //...
@@ -316,14 +319,13 @@ struct FunctionParamPattern {
   FunctionParamPattern(std::unique_ptr<PatternNoTopAlt> p, std::unique_ptr<TypeNode> t) : pattern(std::move(p)), type(std::move(t)) {};
 };
 
-//OuterAttribute* ( FunctionParamPattern | ... | Type​4 )
+//( FunctionParamPattern | ... | Type​4 )
 struct FunctionParam {
-  std::vector<OuterAttributeNode> outer_attributes;
+  //std::vector<OuterAttributeNode> outer_attributes;
   std::variant<std::unique_ptr<FunctionParamPattern>, std::unique_ptr<ellipsis>, std::unique_ptr<TypeNode>> info;
 
-  FunctionParam(std::vector<OuterAttributeNode> oa) : outer_attributes(std::move(oa)), info(std::make_unique<ellipsis>(ellipsis())) {};
-  FunctionParam(std::vector<OuterAttributeNode> oa, std::unique_ptr<FunctionParamPattern> fpp) : outer_attributes(std::move(oa)), info(std::move(fpp)) {};
-  FunctionParam(std::vector<OuterAttributeNode> oa, std::unique_ptr<TypeNode> t) : outer_attributes(std::move(oa)), info(std::move(t)) {};
+  FunctionParam(std::unique_ptr<FunctionParamPattern> fpp) : info(std::move(fpp)) {};
+  FunctionParam(std::unique_ptr<TypeNode> t) : info(std::move(t)) {};
 };
 
 // ->Type
@@ -360,13 +362,11 @@ struct WhereClause {
 
 };
 
-//{ InnerAttribute* Statements? }
+//{ Statements? }
 struct BlockExpression {
-  std::vector<InnerAttributeNode> inner_attribute;
   std::vector<std::unique_ptr<StatementNode>> statements;
 
-  BlockExpression(std::vector<InnerAttributeNode> inner_attr, std::vector<std::unique_ptr<StatementNode>> stmts)
-                  : inner_attribute(std::move(inner_attr)), statements(std::move(stmts)) {};
+  BlockExpression(std::vector<std::unique_ptr<StatementNode>> stmts) : statements(std::move(stmts)) {};
 };
 
 /*
@@ -374,15 +374,16 @@ FunctionQualifier fn identifier GenericParams? ( FunctionParameters? ) FunctionR
 */
 class FunctionNode : public ItemNode {
  public:
-  FunctionQualifier function_qualifier;
+  std::unique_ptr<FunctionQualifier> function_qualifier;
   std::string identifier;
-  std::unique_ptr<GenParaNode> generic_params = nullptr;
-  FunctionParameter function_parameter;
-  std::optional<FunctionReturnType> return_type = std::nullopt;
-  std::optional<WhereClause> where_clause = std::nullopt;
+  //std::unique_ptr<GenParaNode> generic_params = nullptr;
+  std::unique_ptr<FunctionParameter> function_parameter;
+  std::unique_ptr<FunctionReturnType> return_type;
+  //std::optional<WhereClause> where_clause = std::nullopt;
   std::unique_ptr<BlockExpressionNode> block_expression = nullptr;
 
-  FunctionNode(FunctionQualifier fq, std::string id, int l, int c) : function_qualifier(fq), identifier(id), ItemNode(NodeType::Function, l, c) {};
+  FunctionNode(std::unique_ptr<FunctionQualifier> fq, std::string id, int l, int c) 
+            : function_qualifier(std::move(fq)), identifier(id), ItemNode(NodeType::Function, l, c) {};
 };
 
 /*
@@ -422,13 +423,13 @@ struct Visibility {
   Visibility(SimplePath sp) : type(VisType::SIMPLEPATH), simple_path(sp) {};
 };
 
-//StructField → OuterAttribute* Visibility? IDENTIFIER : Type
+//StructField → Visibility? IDENTIFIER : Type
 struct StructField {
-  Visibility visibility;
+  //Visibility visibility;
   std::string identifier;
   std::unique_ptr<TypeNode> type;
 
-  StructField(Visibility vis, std::string id, std::unique_ptr<TypeNode> t) : visibility(vis), identifier(id), type(std::move(t)) {};
+  StructField(std::string id, std::unique_ptr<TypeNode> t) : identifier(id), type(std::move(t)) {};
 };
 
 //StructFields → StructField ( , StructField )* ,?
@@ -439,12 +440,11 @@ class StructFieldNode : public ASTNode {
   StructFieldNode(std::vector<std::unique_ptr<StructField>> sf, int l, int c) : struct_fields(std::move(sf)), ASTNode(NodeType::NodeType_StructField, l, c) {};
 };
 
-//TupleField → OuterAttribute* Visibility? Type
+//TupleField → Visibility? Type
 struct TupleField {
-  std::optional<Visibility> visibility = std::nullopt;
+  //std::optional<Visibility> visibility = std::nullopt;
   std::unique_ptr<TypeNode> type;
 
-  TupleField(Visibility vis, std::unique_ptr<TypeNode> t) : visibility(vis), type(std::move(t)) {};
   TupleField(std::unique_ptr<TypeNode> t) : type(std::move(t)) {};
 };
 
@@ -463,8 +463,8 @@ class TupleFieldNode : public ASTNode {
 class StructStructNode : public ItemNode {
  public:
   std::string identifier;
-  std::unique_ptr<GenParaNode> generic_param;
-  std::unique_ptr<WhereClause> where_clause;
+  //std::unique_ptr<GenParaNode> generic_param;
+  //std::unique_ptr<WhereClause> where_clause;
   std::unique_ptr<StructFieldNode> struct_fields;
 
   StructStructNode(std::string id, int l, int c) : identifier(id), ItemNode(NodeType::StructStruct, l, c) {};
@@ -472,8 +472,8 @@ class StructStructNode : public ItemNode {
 class TupleStructNode : public ItemNode {
  public:
   std::string identifier;
-  std::unique_ptr<GenParaNode> generic_param;
-  std::unique_ptr<WhereClause> where_clause;
+  //std::unique_ptr<GenParaNode> generic_param;
+  //std::unique_ptr<WhereClause> where_clause;
   std::unique_ptr<TupleFieldNode> tuple_fields;
 
   TupleStructNode(std::string id, int l, int c) : identifier(id), ItemNode(NodeType::TupleStruct, l, c) {};
@@ -511,9 +511,10 @@ class EnumVariantDiscriminantNode : public ASTNode {
 //EnumVairant:EnumVariant → OuterAttribute* Visibility? IDENTIFIER ( EnumVariantTuple | EnumVariantStruct )? EnumVariantDiscriminant?
 class EnumVariantNode : public ASTNode {
  public:
-  std::unique_ptr<Visibility> visibility;
+  //std::unique_ptr<Visibility> visibility;
   std::string identifier;
-  std::optional<std::variant<EnumVariantTupleNode, EnumVariantStructNode>> tuple_or_struct_node = std::nullopt;
+  std::unique_ptr<EnumVariantTupleNode> enum_variant_tuple;
+  std::unique_ptr<EnumVariantStructNode> enum_variant_struct;
   std::unique_ptr<EnumVariantDiscriminantNode> discriminant;
 
   EnumVariantNode(std::string s, int l, int c) : identifier(s), ASTNode(NodeType::EnumVariant, l, c) {};
@@ -541,10 +542,11 @@ class EnumerationNode : public ItemNode {
   EnumerationNode(std::string id, int l, int c) : identifier(id), ItemNode(NodeType::Enumeration, l, c) {};
 };
 
+enum ConstantType {
+  ID, _
+};
 class ConstantItemNode : public ItemNode {
-  enum ConstantType {
-    ID, _
-  };
+ public:
   ConstantType constant_type;
   std::optional<std::string> identifier;
   std::unique_ptr<TypeNode> type;
@@ -583,8 +585,9 @@ class TypePathFnInputs {
 class TypePathFn {
  public:
   std::unique_ptr<TypePathFnInputs> type_path_fn_inputs;
+  std::unique_ptr<TypeNode> type_no_bounds;
 
-  TypePathFn(std::unique_ptr<TypePathFnInputs> tpfi) : type_path_fn_inputs(std::move(tpfi)) {};
+  TypePathFn(std::unique_ptr<TypePathFnInputs> tpfi, std::unique_ptr<TypeNode> tnb) : type_path_fn_inputs(std::move(tpfi)), type_no_bounds(std::move(tnb)) {};
 };
 
 //GenericArgsConst → BlockExpression | LiteralExpression | - LiteralExpression | SimplePathSegment
@@ -616,13 +619,20 @@ class GenericArgs {
 //TypePathSegment → PathIdentSegment ( ::? ( GenericArgs | TypePathFn ) )?
 class TypePathSegment {
  public:
-  PathIdentSegment path_ident_segment;
+  std::unique_ptr<PathIdentSegment> path_ident_segment;
+  std::unique_ptr<TypePathFn> type_path_fn;
+
+  TypePathSegment(std::unique_ptr<PathIdentSegment> pis, std::unique_ptr<TypePathFn> tpf)
+                : path_ident_segment(std::move(pis)), type_path_fn(std::move(tpf)) {};
   
 };
 
 //TypePath → ::? TypePathSegment ( :: TypePathSegment )*
 class TypePath {
+ public:
+  std::vector<std::unique_ptr<TypePathSegment>> segments;
 
+  TypePath(std::vector<std::unique_ptr<TypePathSegment>> s) : segments(std::move(s)) {}; 
 };
 
 //TraitBound →  ( ? | ForLifetimes )? TypePath | ( ( ? | ForLifetimes )? TypePath )
@@ -667,11 +677,11 @@ class GenericParams {
 
 //AssociatedItem → ( Visibility? ( ConstantItem | Function ) )
 class AssociatedItemNode : ItemNode {
-  Visibility visibility;
+  //Visibility visibility;
   std::variant<std::unique_ptr<ConstantItemNode>, std::unique_ptr<FunctionNode>> associated_item;
 
-  AssociatedItemNode(Visibility vis, std::unique_ptr<ConstantItemNode> con, int l, int c) : visibility(vis), associated_item(std::move(con)), ItemNode(NodeType::AssociatedItem, l, c) {};
-  AssociatedItemNode(Visibility vis, std::unique_ptr<FunctionNode> con, int l, int c) : visibility(vis), associated_item(std::move(con)), ItemNode(NodeType::AssociatedItem, l, c) {};
+  AssociatedItemNode(Visibility vis, std::unique_ptr<ConstantItemNode> con, int l, int c) : associated_item(std::move(con)), ItemNode(NodeType::AssociatedItem, l, c) {};
+  AssociatedItemNode(Visibility vis, std::unique_ptr<FunctionNode> con, int l, int c) : associated_item(std::move(con)), ItemNode(NodeType::AssociatedItem, l, c) {};
 };
 
 //Trait → unsafe? trait IDENTIFIER GenericParams? ( : TypeParamBounds? )? WhereClause? { InnerAttribute*   AssociatedItem* }
@@ -690,18 +700,18 @@ class TraitNode : public ItemNode {
 class for Implementation node
 */
 
-//InherentImpl → impl GenericParams? Type WhereClause? {  InnerAttribute*  AssociatedItem*}
+//InherentImpl → impl GenericParams? Type WhereClause? { AssociatedItem*}
 
 //Implementation → InherentImpl | TraitImpl
 class ImplementationNode : public ItemNode {
  public:
-  std::vector<std::unique_ptr<GenParaNode>> generic_params;
+  //std::vector<std::unique_ptr<GenParaNode>> generic_params;
   std::unique_ptr<TypeNode> type;
-  WhereClause where_clause;
-  std::unique_ptr<AssociatedItemNode> associated_item;
+  //WhereClause where_clause;
+  std::vector<std::unique_ptr<AssociatedItemNode>> associated_item;
 
-  ImplementationNode(std::vector<std::unique_ptr<GenParaNode>> gp, std::unique_ptr<TypeNode> t, WhereClause wc, std::unique_ptr<AssociatedItemNode> ai, int l, int c) 
-                    : generic_params(std::move(gp)), type(std::move(t)), where_clause(wc), associated_item(std::move(ai)), ItemNode(NodeType::Implementation, l, c) {};
+  ImplementationNode(std::unique_ptr<TypeNode> t, std::vector<std::unique_ptr<AssociatedItemNode>> ai, int l, int c) 
+                    : type(std::move(t)), associated_item(std::move(ai)), ItemNode(NodeType::Implementation, l, c) {};
 };
 
 //GenericParams → < ( GenericParam ( , GenericParam )* ,? )? >
@@ -717,9 +727,16 @@ class GenParaNode : public ItemNode {
 class of statements
 */
 
-//LetStatement → OuterAttribute* let PatternNoTopAlt ( : Type )? ( = Expression | = Expressionexcept LazyBooleanExpression or end with a } else BlockExpression)? ;
+//LetStatement → let PatternNoTopAlt ( : Type )? ( = Expression | = Expression except LazyBooleanExpression or end with a } else BlockExpression)? ;
 class LetStatement {
+ public:
+  std::unique_ptr<PatternNoTopAlt> pattern;
+  std::unique_ptr<TypeNode> type;
+  std::unique_ptr<ExpressionNode> expression; //except LazyBooleanExpression or end with a }
+  std::unique_ptr<BlockExpressionNode> block_expression;
 
+  LetStatement(std::unique_ptr<PatternNoTopAlt> p, std::unique_ptr<TypeNode> t, std::unique_ptr<ExpressionNode> e, std::unique_ptr<BlockExpressionNode> be)
+            : pattern(std::move(p)), type(std::move(t)), expression(std::move(e)), block_expression(std::move(be)) {};
 };
 
 //ExpressionStatement → ExpressionWithoutBlock ; | ExpressionWithBlock ;?
@@ -731,37 +748,37 @@ class ExpressionStatement {
 };
 
 //Statement →  ; | Item  | LetStatement | ExpressionStatement
+enum StatementType {
+  SEMICOLON, ITEM, LETSTATEMENT, EXPRESSIONSTATEMENT
+};
 class StatementNode : ASTNode {
  public:
-  enum StatementType {
-    SEMICOLON, ITEM, LETSTATEMENT, EXPRESSIONSTATEMENT
-  };
   StatementType type;
-  std::optional<std::unique_ptr<ItemNode>> item = std::nullopt; //item
-  std::optional<std::unique_ptr<LetStatement>> let_statement = std::nullopt; //letstatement
-  std::optional<std::unique_ptr<ExpressionStatement>> expr_statement = std::nullopt; //ExpressionStatement
+  std::unique_ptr<ItemNode> item; //item
+  std::unique_ptr<LetStatement> let_statement; //letstatement
+  std::unique_ptr<ExpressionStatement> expr_statement; //ExpressionStatement
   bool check() {
     switch (type) {
       case(SEMICOLON) : {
-        if (item == std::nullopt && let_statement == std::nullopt && expr_statement == std::nullopt) {
+        if (item == nullptr && let_statement == nullptr && expr_statement == nullptr) {
           return true;
         }
         return false;
       }
       case(ITEM) : {
-        if (item != std::nullopt && let_statement == std::nullopt && expr_statement == std::nullopt) {
+        if (item != nullptr && let_statement == nullptr && expr_statement == nullptr) {
           return true;
         }
         return false;
       }
       case(LETSTATEMENT) : {
-        if (item == std::nullopt && let_statement != std::nullopt && expr_statement == std::nullopt) {
+        if (item == nullptr && let_statement != nullptr && expr_statement == nullptr) {
           return true;
         }
         return false;
       }
       case(EXPRESSIONSTATEMENT) : {
-        if (item == std::nullopt && let_statement == std::nullopt && expr_statement != std::nullopt) {
+        if (item == nullptr && let_statement == nullptr && expr_statement != nullptr) {
           return true;
         }
         return false;
@@ -769,6 +786,9 @@ class StatementNode : ASTNode {
       default: return false;
     }
   };
+
+  StatementNode(StatementType t, std::unique_ptr<ItemNode> i, std::unique_ptr<LetStatement> ls, std::unique_ptr<ExpressionStatement> e, int l, int c)
+            : type(t), item(std::move(i)), let_statement(std::move(ls)), expr_statement(std::move(e)), ASTNode(NodeType::Statement, l, c) {};
 };
 
 /*
@@ -1185,7 +1205,7 @@ public:
 };
 
 //LiteralExpression → CHAR_LITERAL | STRING_LITERAL | RAW_STRING_LITERAL | C_STRING_LITERAL | RAW_C_STRING_LITERAL | INTEGER_LITERAL | FLOAT_LITERAL | true | false
-class LiteralExpressionNode : ExpressionNode {
+class LiteralExpressionNode : public ExpressionNode {
  public:
   std::variant<std::unique_ptr<char_literal>, std::unique_ptr<string_literal>, std::unique_ptr<raw_string_literal>, std::unique_ptr<c_string_literal>, 
                std::unique_ptr<raw_c_string_literal>, std::unique_ptr<integer_literal>, std::unique_ptr<float_literal>, std::unique_ptr<bool>> literal;
@@ -1197,13 +1217,22 @@ class LiteralExpressionNode : ExpressionNode {
 //                        | IndexExpression | TupleExpression | TupleIndexingExpression | StructExpression | CallExpression | MethodCallExpression
 //                        | FieldExpression | ClosureExpression | AsyncBlockExpression | ContinueExpression | BreakExpression
 //                        | RangeExpression | ReturnExpression | UnderscoreExpression | MacroInvocation
-class ExpressionWithoutBlockNode : ExpressionNode {
+class ExpressionWithoutBlockNode : public ExpressionNode {
+ public:
+  std::variant<std::unique_ptr<LiteralExpressionNode>, std::unique_ptr<PathExpressionNode>, std::unique_ptr<OperatorExpressionNode>,
+              std::unique_ptr<GroupedExpressionNode>, std::unique_ptr<ArrayExpressionNode>, std::unique_ptr<IndexExpressionNode>, 
+              std::unique_ptr<TupleExpressionNode>, std::unique_ptr<TupleIndexingExpressionNode>, std::unique_ptr<StructExpressionNode>,
+              std::unique_ptr<CallExpressionNode>, std::unique_ptr<MethodCallExpressionNode>, std::unique_ptr<FieldExpressionNode>, 
+              std::unique_ptr<RangeExpressionNode>, std::unique_ptr<ReturnExpressionNode>, std::unique_ptr<UnderscoreExpressionNode>> expr;
 
+  template <typename T>
+  ExpressionWithoutBlockNode(std::unique_ptr<T> node, int l, int c)
+      : ExpressionNode(NodeType::ExpressionWithoutBlock, l, c), expr(std::move(node)), ExpressionNode(NodeType::ExpressionWithoutBlock, l, c) {}
 };
 
-//BlockExpression → { InnerAttribute*  Statements? }
+//BlockExpression → { Statements? }
 //Statements → Statement+ | Statement+ ExpressionWithoutBlock | ExpressionWithoutBlock
-class BlockExpressionNode : ExpressionNode {
+class BlockExpressionNode : public ExpressionNode {
  public:
   bool if_empty = false;
   std::vector<std::unique_ptr<StatementNode>> statement;
@@ -1217,7 +1246,7 @@ class BlockExpressionNode : ExpressionNode {
 //OperatorExpression → BorrowExpression | DereferenceExpression | NegationExpression | ArithmeticOrLogicalExpression | ComparisonExpression 
 //                    | LazyBooleanExpression | TypeCastExpression | AssignmentExpression | CompoundAssignmentExpression
 
-class OperatorExpressionNode : ExpressionNode {
+class OperatorExpressionNode : public ExpressionNode {
  public:
   std::variant<std::unique_ptr<BorrowExpressionNode>, std::unique_ptr<DereferenceExpressionNode>, std::unique_ptr<NegationExpressionNode>, std::unique_ptr<ArithmeticOrLogicalExpressionNode>, 
               std::unique_ptr<ComparisonExpressionNode>, std::unique_ptr<LazyBooleanExpressionNode>, std::unique_ptr<TypeCastExpressionNode>, std::unique_ptr<AssignmentExpressionNode>, 
@@ -1228,20 +1257,20 @@ class OperatorExpressionNode : ExpressionNode {
 };
 
 //BorrowExpression → ( & | && ) Expression | ( & | && ) mut Expression | ( & | && ) raw const Expression | ( & | && ) raw mut Expression
-class BorrowExpressionNode : ExpressionNode {
+class BorrowExpressionNode : public ExpressionNode {
  public:
-  int AmpersandCount = 0; //1 or 2
+  int and_count = 0; //1 or 2
   bool if_mut = false; //有无mut
   bool if_const = false;
   bool if_raw = false;
   std::unique_ptr<ExpressionNode> expression;
 
   BorrowExpressionNode(int count, bool im, bool ic, bool ir, std::unique_ptr<ExpressionNode> expr, int l, int c) 
-                      : AmpersandCount(count), if_mut(im), if_const(ic), if_raw(ir), expression(std::move(expr)), ExpressionNode(NodeType::BorrowExpression, l, c) {};
+                      : and_count(count), if_mut(im), if_const(ic), if_raw(ir), expression(std::move(expr)), ExpressionNode(NodeType::BorrowExpression, l, c) {};
 };
 
 //DereferenceExpression → * Expression
-class DereferenceExpressionNode : ExpressionNode {
+class DereferenceExpressionNode : public ExpressionNode {
  public:
   std::unique_ptr<ExpressionNode> expression;
 
@@ -1250,7 +1279,7 @@ class DereferenceExpressionNode : ExpressionNode {
 };
 
 //NegationExpression → - Expression | ! Expression
-class NegationExpressionNode : ExpressionNode {
+class NegationExpressionNode : public ExpressionNode {
  public:
   enum NegationType {
     MINUS, BANG
@@ -1262,9 +1291,10 @@ class NegationExpressionNode : ExpressionNode {
                         : type(t), expression(std::move(expr)), ExpressionNode(NodeType::NegationExpression, l, c) {};
 };
 
+
 //ArithmeticOrLogicalExpression → Expression + Expression | Expression - Expression | Expression * Expression | Expression / Expression | Expression % Expression 
 //                              | Expression & Expression | Expression | Expression | Expression ^ Expression | Expression << Expression | Expression >> Expression
-class ArithmeticOrLogicalExpressionNode : ExpressionNode {
+class ArithmeticOrLogicalExpressionNode : public ExpressionNode {
  public:
   OperationType type;
   std::unique_ptr<ExpressionNode> expression1, expression2;
@@ -1274,17 +1304,17 @@ class ArithmeticOrLogicalExpressionNode : ExpressionNode {
 };
 
 //ComparisonExpression → Expression == Expression | Expression != Expression | Expression > Expression | Expression < Expression | Expression >= Expression | Expression <= Expression
-class ComparisonExpressionNode : ExpressionNode {
+class ComparisonExpressionNode : public ExpressionNode {
  public:
   ComparisonType type;
   std::unique_ptr<ExpressionNode> expression1, expression2;
 
   ComparisonExpressionNode(ComparisonType t, std::unique_ptr<ExpressionNode> expr1, std::unique_ptr<ExpressionNode> expr2, int l, int c)
-                                  : type(t), expression1(std::move(expr1)), expression2(std::move(expr2)), ExpressionNode(NodeType::ArithmeticOrLogicalExpression, l, c) {};
+                                  : type(t), expression1(std::move(expr1)), expression2(std::move(expr2)), ExpressionNode(NodeType::ComparisonExpression, l, c) {};
 };
 
 //LazyBooleanExpression → Expression || Expression | Expression && Expression
-class LazyBooleanExpressionNode : ExpressionNode {
+class LazyBooleanExpressionNode : public ExpressionNode {
  public:
   enum LazyBooleanType {
     OR, AND
@@ -1297,7 +1327,7 @@ class LazyBooleanExpressionNode : ExpressionNode {
 };
 
 //TypeCastExpression → Expression as TypeNoBounds
-class TypeCastExpressionNode : ExpressionNode {
+class TypeCastExpressionNode : public ExpressionNode {
  public:
   std::unique_ptr<ExpressionNode> expression;
   std::unique_ptr<TypeNode> type;
@@ -1307,7 +1337,7 @@ class TypeCastExpressionNode : ExpressionNode {
 };
 
 //AssignmentExpression → Expression = Expression
-class AssignmentExpressionNode : ExpressionNode {
+class AssignmentExpressionNode : public ExpressionNode {
  public:
   std::unique_ptr<ExpressionNode> expression1, expression2;
 
@@ -1317,7 +1347,7 @@ class AssignmentExpressionNode : ExpressionNode {
 
 //CompoundAssignmentExpression → Expression += Expression | Expression -= Expression | Expression *= Expression | Expression /= Expression | Expression %= Expression
 //                              | Expression &= Expression | Expression |= Expression | Expression ^= Expression | Expression <<= Expression | Expression >>= Expression
-class CompoundAssignmentExpressionNode : ExpressionNode {
+class CompoundAssignmentExpressionNode : public ExpressionNode {
  public: 
   OperationType type;
   std::unique_ptr<ExpressionNode> expression1, expression2;
@@ -1327,7 +1357,7 @@ class CompoundAssignmentExpressionNode : ExpressionNode {
 };
 
 //GroupedExpression → ( Expression )
-class GroupedExpressionNode : ExpressionNode {
+class GroupedExpressionNode : public ExpressionNode {
  public:
   std::unique_ptr<ExpressionNode> expression;
 
@@ -1336,7 +1366,7 @@ class GroupedExpressionNode : ExpressionNode {
 
 //ArrayExpression → [ ArrayElements? ]
 //ArrayElements → Expression ( , Expression )* ,? | Expression ; Expression
-class ArrayExpressionNode : ExpressionNode {
+class ArrayExpressionNode : public ExpressionNode {
  public:
   bool if_empty = true;
   enum ArrayExpressionType {
@@ -1423,12 +1453,12 @@ class QualifiedPathInExpression {
                           : type(std::move(t)), type_path(std::move(tp)), segments(std::move(s)) {};
 };
 
-class PathExpressionNode : ExpressionNode {
+class PathExpressionNode : public ExpressionNode {
  public:
   std::variant<std::unique_ptr<PathInExpression>, std::unique_ptr<QualifiedPathInExpression>> path;
 
   template<typename T>
-  PathExpressionNode(T p) : path(std::move(p)) {};
+  PathExpressionNode(T p, int l, int c) : path(std::move(p)), ExpressionNode(NodeType::PathExpression, l, c) {};
 };
 
 //StructBase → .. Expression
@@ -1476,7 +1506,7 @@ class StructExprFields {
 };
 
 //StructExpression → PathInExpression { ( StructExprFields | StructBase )? }
-class StructExpressionNode : ExpressionNode {
+class StructExpressionNode : public ExpressionNode {
  public:
   std::unique_ptr<PathInExpression> pathin_expression = nullptr;
   std::unique_ptr<StructExprFields> struct_expr_fields = nullptr;
@@ -1490,7 +1520,7 @@ class StructExpressionNode : ExpressionNode {
 };
 
 //CallExpression → Expression ( CallParams? )
-class CallExpressionNode : ExpressionNode {
+class CallExpressionNode : public ExpressionNode {
  public:
   std::unique_ptr<ExpressionNode> expression;
   std::unique_ptr<CallParams> call_params = nullptr;
@@ -1508,7 +1538,7 @@ class CallParams {
 };
 
 //MethodCallExpression → Expression . PathExprSegment ( CallParams? )
-class MethodCallExpressionNode : ExpressionNode {
+class MethodCallExpressionNode : public ExpressionNode {
  public:
   std::unique_ptr<ExpressionNode> expression = nullptr;
   std::variant<PathInType, Identifier> path_expr_segment;
@@ -1520,7 +1550,7 @@ class MethodCallExpressionNode : ExpressionNode {
 };
 
 //FieldExpression → Expression . IDENTIFIER
-class FieldExpressionNode : ExpressionNode {
+class FieldExpressionNode : public ExpressionNode {
  public:
   std::unique_ptr<ExpressionNode> expression = nullptr;
   Identifier identifier;
@@ -1528,7 +1558,7 @@ class FieldExpressionNode : ExpressionNode {
   FieldExpressionNode(std::unique_ptr<ExpressionNode> expr, Identifier id, int l , int c) : expression(std::move(expr)), identifier(id), ExpressionNode(NodeType::FieldExpression, l, c) {};
 };
 
-
+//LiteralPattern → -? LiteralExpression
 class LiteralPattern {
  public:
   bool if_minus = false;
@@ -1537,6 +1567,7 @@ class LiteralPattern {
   LiteralPattern(bool im, std::unique_ptr<LiteralExpressionNode> l) : if_minus(im), literal(std::move(l)) {};
 };
 
+//IdentifierPattern → ref? mut? IDENTIFIER ( @ PatternNoTopAlt )?
 class IdentifierPattern {
  public:
   bool if_ref = false;
@@ -1547,7 +1578,10 @@ class IdentifierPattern {
   IdentifierPattern(bool ir, bool im, Identifier id, std::unique_ptr<PatternNoTopAlt> pnta) : if_ref(ir), if_mut(im), pattern_no_top_alt(std::move(pnta)), identifier(id) {};
 };
 
+//WildcardPattern → _
 class WildCardPattern;
+
+//RestPattern → ..
 class RestPattern;
 
 //ReferencePattern → ( & | && ) mut? PatternWithoutRange
@@ -1709,7 +1743,7 @@ class RangeToExclusivePattern {
  public:
   std::unique_ptr<RangePatternBound> range_pattern_bound;
 
-  explicit RangeToExclusivePattern(std::unique_ptr<RangePatternBound> e) : range_pattern_bound(std::move(e)) {}
+  RangeToExclusivePattern(std::unique_ptr<RangePatternBound> e) : range_pattern_bound(std::move(e)) {}
 };
 
 class RangeToInclusivePattern {
@@ -1809,7 +1843,7 @@ class Conditions {
 };
 
 //InfiniteLoopExpression → loop BlockExpression
-class InfiniteLoopExpressionNode : ExpressionNode {
+class InfiniteLoopExpressionNode : public ExpressionNode {
  public:
   std::unique_ptr<BlockExpressionNode> block_expression;
 
@@ -1817,7 +1851,7 @@ class InfiniteLoopExpressionNode : ExpressionNode {
 };
 
 //PredicateLoopExpression → while Conditions BlockExpression
-class PredicateLoopExpressionNode : ExpressionNode {
+class PredicateLoopExpressionNode : public ExpressionNode {
  public:
   std::unique_ptr<Conditions> conditions;
   std::unique_ptr<BlockExpressionNode> block_expression;
@@ -1827,7 +1861,7 @@ class PredicateLoopExpressionNode : ExpressionNode {
 };
 
 //LoopExpression → InfiniteLoopExpression | PredicateLoopExpression
-class LoopExpression : ExpressionNode {
+class LoopExpression : public ExpressionNode {
  public:
   std::variant<std::unique_ptr<InfiniteLoopExpressionNode>, std::unique_ptr<PredicateLoopExpressionNode>> loop_expression;
 
@@ -1897,7 +1931,7 @@ public:
 };
 
 //IfExpression → if Conditions BlockExpression ( else ( BlockExpression | IfExpression ) )?
-class IfExpressionNode : ExpressionNode {
+class IfExpressionNode : public ExpressionNode {
  public:
   std::unique_ptr<Conditions> conditions;
   std::unique_ptr<BlockExpressionNode> block_expression;
@@ -1953,7 +1987,7 @@ class MatchArms {
           : match_arms(std::move(mas)), match_arm(std::move(ma)) {};
 };
 
-class MatchExpressionNode : ExpressionNode {
+class MatchExpressionNode : public ExpressionNode {
  public:
   std::unique_ptr<ExpressionNode> scrutinee;
   std::unique_ptr<MatchArms> match_arms;
@@ -1963,7 +1997,7 @@ class MatchExpressionNode : ExpressionNode {
 };
 
 //ReturnExpression → return Expression?
-class ReturnExpressionNode : ExpressionNode {
+class ReturnExpressionNode : public ExpressionNode {
  public:
   std::unique_ptr<ExpressionNode> expression;
 
@@ -1971,8 +2005,2967 @@ class ReturnExpressionNode : ExpressionNode {
 };  
 
 //UnderscoreExpression → _
-class UnderscoreExpressionNode : ExpressionNode {
+class UnderscoreExpressionNode : public ExpressionNode {
  public:
   UnderscoreExpressionNode(int l, int c) : ExpressionNode(NodeType::UnderscoreExpression, l, c) {};
 };
+
+/*
+classes for Pratt Parsing (Prefix)
+*/
+struct PrefixKey {
+  TokenType type;
+  std::string value;
+
+  bool operator == (PrefixKey const &o) const {
+    return type == o.type && value == o.value;
+  }
+  bool operator < (const PrefixKey& o) {
+    if (type != o.type) return type < o.type;
+    return value < o.value;
+  }
+};
+
+struct InfixKey {
+  TokenType type;
+  std::string value;
+
+  bool operator == (InfixKey const &o) const {
+    return type == o.type && value == o.value;
+  }
+  bool operator < (const InfixKey& o) {
+    if (type != o.type) return type < o.type;
+    return value < o.value;
+  }
+};
+
+class PrefixParselet {
+ public:
+  virtual std::unique_ptr<ExpressionNode> parse(parser& p, const Token& token) = 0;
+  virtual ~PrefixParselet() = default;
+};
+
+class LiteralParselet : public PrefixParselet {
+ public:
+  std::unique_ptr<ExpressionNode> parse(parser& p, const Token& token) override {
+    switch (token.type) {
+      case CHAR_LITERAL:
+        return std::make_unique<LiteralExpressionNode>(
+          std::make_unique<char_literal>(token.value), token.line, token.column);
+      case STRING_LITERAL:
+        return std::make_unique<LiteralExpressionNode>(
+          std::make_unique<string_literal>(token.value), token.line, token.column);
+      case RAW_STRING_LITERAL:
+        return std::make_unique<LiteralExpressionNode>(
+        std::make_unique<raw_string_literal>(token.value), token.line, token.column);
+      case C_STRING_LITERAL:
+        return std::make_unique<LiteralExpressionNode>(
+          std::make_unique<c_string_literal>(token.value), token.line, token.column);
+      case RAW_C_STRING_LITERAL:
+        return std::make_unique<LiteralExpressionNode>(
+          std::make_unique<raw_c_string_literal>(token.value), token.line, token.column);
+      case INTEGER_LITERAL:
+        return std::make_unique<LiteralExpressionNode>(
+          std::make_unique<integer_literal>(token.value), token.line, token.column);
+      case FLOAT_LITERAL:
+        return std::make_unique<LiteralExpressionNode>(
+          std::make_unique<float_literal>(token.value), token.line, token.column);
+      case STRICT_KEYWORD:
+        if (token.value == "true") {
+          return std::make_unique<LiteralExpressionNode>(
+            std::make_unique<bool>(true), token.line, token.column);
+        } else if (token.value == "false") {
+          return std::make_unique<LiteralExpressionNode>(
+            std::make_unique<bool>(false), token.line, token.column);
+        } else {
+          throw std::runtime_error("Unexpected keyword in literal parselet");
+        }
+      default:
+        throw std::runtime_error("Unexpected token in literal parselet");
+    }
+  }
+};
+
+class BlockExpressionParselet : public PrefixParselet {
+ public:
+  std::unique_ptr<ExpressionNode> parse(parser& p, const Token& token) override {
+    int line = token.line;
+    int col = token.column;
+
+    std::vector<std::unique_ptr<StatementNode>> statements;
+    std::optional<std::unique_ptr<ExpressionWithoutBlockNode>> expr = std::nullopt;
+
+    auto next = p.peek();
+    if (next && next->type == DELIMITER && next->value == "}") {
+      p.get();
+      return std::make_unique<BlockExpressionNode>(line, col);
+    }
+
+    while (true) {
+      auto tok = p.peek();
+      if (!tok) throw std::runtime_error("Unterminated block expression");
+
+      if (tok->type == DELIMITER && tok->value == "}") { p.get(); break; }
+      auto stmt = p.ParseStatement();
+      if (stmt) {
+        statements.push_back(std::move(stmt));
+        continue;
+      }
+
+      auto exprCandidate = p.parseExpressionWithoutBlock();
+      if (exprCandidate) {
+        expr = std::move(exprCandidate);
+        auto close = p.get();
+        if (!close || close->type != DELIMITER || close->value != "}") throw std::runtime_error("Expected '}' after block expression");
+        break;
+      }
+      throw std::runtime_error("Unexpected token in block expression at line " + std::to_string(tok->line));
+    }
+    return std::make_unique<BlockExpressionNode>(std::move(statements), std::move(expr), line, col);
+  }
+};
+
+class BorrowExpressionParselet : public PrefixParselet {
+ public:
+  std::unique_ptr<ExpressionNode> parse(parser& p, const Token& token) override {
+    int and_count = (token.value == "&&" ? 2 : 1);
+
+    bool isMut = false;
+    bool isRaw = false;
+    bool isConst = false;
+
+    auto nextTok = p.peek();
+    if (nextTok) {
+      if (nextTok->value == "mut") {
+        p.get();
+        isMut = true;
+      } 
+      else if (nextTok->value == "raw") {
+        p.get();
+        auto afterRaw = p.get();
+        if (!afterRaw) throw std::runtime_error("Expected 'const' or 'mut' after 'raw'");
+        if (afterRaw->value == "const") {
+          isRaw = true;
+          isConst = true;
+        } else if (afterRaw->value == "mut") {
+          isRaw = true;
+          isMut = true;
+        } else {
+          throw std::runtime_error("Expected 'const' or 'mut' after 'raw'");
+        }
+      }
+    }
+
+    auto expr = p.parseExpression();
+
+    return std::make_unique<BorrowExpressionNode>(
+      and_count, isMut, isConst, isRaw,
+      std::move(expr),
+      token.line, token.column
+    );
+  }
+};
+
+class DereferenceExpressionParselet : public PrefixParselet {
+ public:
+  std::unique_ptr<ExpressionNode> parse(parser& p, const Token& token) override {
+    auto expr = p.parseExpression();
+    return std::make_unique<DereferenceExpressionNode>(
+      std::move(expr),
+      token.line, token.column
+    );
+  }
+};
+
+
+class NegationExpressionParselet : public PrefixParselet {
+ public:
+  std::unique_ptr<ExpressionNode> parse(parser& p, const Token& token) override {
+    NegationExpressionNode::NegationType negType;
+
+    if (token.value == "-") {
+      negType = NegationExpressionNode::MINUS;
+    } else if (token.value == "!") {
+      negType = NegationExpressionNode::BANG;
+    } else {
+      throw std::runtime_error("Unexpected token for NegationExpression: " + token.value);
+    }
+
+    auto expr = p.parseExpression();
+
+    return std::make_unique<NegationExpressionNode>(
+      negType, std::move(expr),
+      token.line, token.column
+    );
+  }
+};
+
+class GroupedExpressionParselet : public PrefixParselet {
+ public:
+  std::unique_ptr<ExpressionNode> parse(parser& p, const Token& token) override {
+    auto expr = p.parseExpression();
+    auto next = p.get();
+    if (!next || next->type != PUNCTUATION || next->value != ")") throw std::runtime_error("Expected ')' to close grouped expression");
+    return std::make_unique<GroupedExpressionNode>(
+      std::move(expr),
+      token.line,
+      token.column
+    );
+  }
+};
+
+class ArrayExpressionParselet : public PrefixParselet {
+ public:
+  std::unique_ptr<ExpressionNode> parse(parser& p, const Token& token) override {
+    std::vector<std::unique_ptr<ExpressionNode>> elements;
+    bool if_empty = true;
+    ArrayExpressionNode::ArrayExpressionType type = ArrayExpressionNode::LITERAL;
+
+    auto next = p.peek();
+    if (!next || (next->type == PUNCTUATION && next->value == "]")) {
+      p.get();
+      return std::make_unique<ArrayExpressionNode>(true, type, std::move(elements), token.line, token.column);
+    }
+
+    if_empty = false;
+
+    while (true) {
+      auto expr = p.parseExpression();
+      elements.push_back(std::move(expr));
+
+      auto sep = p.get();
+      if (!sep) throw std::runtime_error("Unexpected end of array expression");
+
+      if (sep->type == PUNCTUATION && sep->value == ",") {
+        auto lookahead = p.peek();
+        if (lookahead && lookahead->type == PUNCTUATION && lookahead->value == "]") { p.get(); break; }
+        continue;
+      } else if (sep->type == PUNCTUATION && sep->value == ";") {
+        type = ArrayExpressionNode::REPEAT;
+        auto count_expr = p.parseExpression();
+        elements.push_back(std::move(count_expr));
+
+        auto close = p.get();
+        if (!close || close->type != PUNCTUATION || close->value != "]") {
+          throw std::runtime_error("Expected ']' after repeat array");
+        }
+        break;
+      } else if (sep->type == PUNCTUATION && sep->value == "]") break;
+      else { throw std::runtime_error("Unexpected token in array expression"); }
+    }
+
+    return std::make_unique<ArrayExpressionNode>(if_empty, type, std::move(elements), token.line, token.column);
+  }
+};
+
+class TupleExpressionParselet : public PrefixParselet {
+ public:
+  std::unique_ptr<ExpressionNode> parse(parser& p, const Token& token) override {
+    std::vector<std::unique_ptr<ExpressionNode>> elements;
+    auto next = p.peek();
+    if (next && !(next->type == TokenType::PUNCTUATION && next->value == ")")) {
+      while (true) {
+        elements.push_back(p.parseExpression());
+        auto delimiter = p.get();
+        if (!delimiter) throw std::runtime_error("Expected ',' or ')' in tuple expression");
+        if (delimiter->type == TokenType::PUNCTUATION && delimiter->value == ")") break;
+        if (!(delimiter->type == TokenType::PUNCTUATION && delimiter->value == ",")) throw std::runtime_error("Expected ',' in tuple expression");
+        auto after_comma = p.peek();
+        if (after_comma && after_comma->type == TokenType::PUNCTUATION && after_comma->value == ")") { p.get(); break; }
+      }
+    } else {
+      auto closing = p.get();
+      if (!closing || closing->type != TokenType::PUNCTUATION || closing->value != ")") throw std::runtime_error("Expected ')' for empty tuple");
+    }
+
+    return std::make_unique<TupleExpressionNode>(std::move(elements), token.line, token.column);
+  }
+};
+
+//Tuple & Grouped Expression
+class ParenExpressionParselet : public PrefixParselet {
+public:
+  std::unique_ptr<ExpressionNode> parse(parser& p, const Token& token) override {
+    std::vector<std::unique_ptr<ExpressionNode>> elements;
+    bool has_comma = false;
+    auto next = p.peek();
+    if (next && !(next->type == TokenType::PUNCTUATION && next->value == ")")) {
+      while (true) {
+        elements.push_back(p.parseExpression());
+        if (elements.size() == 1) {//判断是tuple还是grouped
+          auto delimiter = p.peek();
+          if (!delimiter) throw std::runtime_error("Expected ',' or ')' in paren expression");
+          if (delimiter->type == TokenType::PUNCTUATION && delimiter->value == ")") {//如果是(Expression)，直接返回
+            p.get();
+            std::unique_ptr<ExpressionNode> expr = std::move(elements[0]);
+            return std::make_unique<GroupedExpressionNode>(
+              std::move(expr),
+              token.line,
+              token.column
+            );
+          }
+        }
+        auto delimiter = p.get();
+        if (!delimiter) throw std::runtime_error("Expected ',' or ')' in tuple expression");
+        if (delimiter->type == TokenType::PUNCTUATION && delimiter->value == ")") break;
+        if (!(delimiter->type == TokenType::PUNCTUATION && delimiter->value == ",")) throw std::runtime_error("Expected ',' in tuple expression");
+        auto after_comma = p.peek();
+        
+        if (after_comma && after_comma->type == TokenType::PUNCTUATION && after_comma->value == ")") { p.get(); break; }
+      }
+    } else {
+      auto closing = p.get();
+      if (!closing || closing->type != TokenType::PUNCTUATION || closing->value != ")") throw std::runtime_error("Expected ')' for empty tuple");
+    }
+
+    return std::make_unique<TupleExpressionNode>(std::move(elements), token.line, token.column);
+  }
+};
+
+
+class PathExpressionParselet : public PrefixParselet {
+ public:
+  std::unique_ptr<ExpressionNode> parse(parser& p, const Token& token) override {
+    if (token.type == TokenType::PUNCTUATION && token.value == "<") {
+      auto typeNode = p.ParseType();
+      std::unique_ptr<TypePath> typePath = nullptr;
+
+      if (auto maybeAs = p.peek(); maybeAs && maybeAs->type == TokenType::RESERVED_KEYWORD && maybeAs->value == "as") {
+        p.get();
+        typePath = p.ParseTypePath();
+      }
+
+      auto gt = p.get();
+      if (!gt || gt->value != ">") throw std::runtime_error("Expected '>' to close QualifiedPathType");
+
+      std::vector<std::variant<PathInType, Identifier>> segments;
+      while (true) {
+        auto delim = p.peek();
+        if (!delim || delim->value != "::") break;
+        p.get();
+
+        auto seg = parse_path_expr_segment(p);
+        segments.push_back(seg);
+      }
+
+      return std::make_unique<PathExpressionNode>(
+        std::make_unique<QualifiedPathInExpression>(
+          std::move(typeNode), std::move(typePath), std::move(segments)
+        ),
+        token.line, token.column
+      );
+    }
+
+    std::vector<std::variant<PathInType, Identifier>> segments;
+    bool leading_double_colon = (token.type == TokenType::PUNCTUATION && token.value == "::");
+    if (leading_double_colon) {
+      auto seg = parse_path_expr_segment(p);
+      segments.push_back(seg);
+    } else {
+      segments.push_back(parse_path_expr_segment(p, token));
+    }
+
+    while (true) {
+      auto delim = p.peek();
+      if (!delim || delim->value != "::") break;
+      p.get();
+      auto seg = parse_path_expr_segment(p);
+      segments.push_back(seg);
+    }
+
+    return std::make_unique<PathExpressionNode>(
+      std::make_unique<PathInExpression>(std::move(segments)),
+      token.line, token.column
+    );
+  }
+
+ private:
+  std::variant<PathInType, Identifier> parse_path_expr_segment(parser& p, std::optional<Token> firstToken = std::nullopt) {
+    Token t;
+    if (firstToken) {
+      t = *firstToken;
+    } else {
+      auto tok = p.get();
+      if (!tok) throw std::runtime_error("Unexpected EOF in PathExprSegment");
+      t = *tok;
+    }
+
+    if (t.type == TokenType::IDENTIFIER) return Identifier(t.value);
+    if (t.type == TokenType::RESERVED_KEYWORD) {
+      if (t.value == "super") return PathInType::SUPER;
+      if (t.value == "self")  return PathInType::self;
+      if (t.value == "Self")  return PathInType::Self;
+      if (t.value == "crate") return PathInType::CRATE;
+    }
+    if (t.type == TokenType::STRICT_KEYWORD && t.value == "$crate") return PathInType::$CRATE;
+    throw std::runtime_error("Invalid PathExprSegment: " + t.value);
+  }
+};
+
+class StructExpressionParselet : public PrefixParselet {
+ public:
+  std::unique_ptr<ExpressionNode> parse(parser& p, const Token& token) override {
+    auto pathInExpr = parse_path_in_expression(p, token);
+
+    auto lbrace = p.get();
+    if (!lbrace || lbrace->type != TokenType::DELIMITER || lbrace->value != "{") {
+      throw std::runtime_error("Expected '{' after PathInExpression in StructExpression");
+    }
+    if (auto maybeRbrace = p.peek(); maybeRbrace && maybeRbrace->value == "}") {
+      p.get();
+      return std::make_unique<StructExpressionNode>(std::move(pathInExpr), token.line, token.column);
+    }
+
+    auto next = p.peek();
+    if (!next) throw std::runtime_error("Unexpected EOF in StructExpression body");
+
+    std::unique_ptr<StructExprFields> structFields = nullptr;
+    std::unique_ptr<StructBase> structBase = nullptr;
+
+    if (next->value == "..") {
+      p.get();
+      auto expr = p.parseExpression();
+      structBase = std::make_unique<StructBase>(std::move(expr));
+    } else {
+      std::vector<std::unique_ptr<StructExprField>> fields;
+      structBase = nullptr;
+
+      while (true) {
+        auto fieldToken = p.get();
+        if (!fieldToken || (fieldToken->type != TokenType::IDENTIFIER && fieldToken->type != TokenType::INTEGER_LITERAL)) {
+          throw std::runtime_error("Expected identifier or tuple index in StructExprField");
+        }
+
+        if (auto colon = p.peek(); colon && colon->value == ":") {
+          p.get();
+          auto expr = p.parseExpression();
+
+          if (fieldToken->type == TokenType::IDENTIFIER) {
+            Identifier id(fieldToken->value);
+            fields.push_back(std::make_unique<StructExprField>(id, id, std::move(expr)));
+          } else if (fieldToken->type == TokenType::INTEGER_LITERAL) {
+            Identifier fake_id(fieldToken->value);
+            integer_literal idx(fieldToken->value);
+            fields.push_back(std::make_unique<StructExprField>(fake_id, idx, std::move(expr)));
+          }
+        } else {
+          Identifier id(fieldToken->value);
+          auto expr = std::make_unique<PathExpressionNode>(
+            std::make_unique<PathInExpression>(std::vector<std::variant<PathInType, Identifier>>{id}),
+            fieldToken->line, fieldToken->column
+          );
+          fields.push_back(std::make_unique<StructExprField>(id, id, std::move(expr)));
+        }
+
+        auto commaOrRbrace = p.peek();
+        if (!commaOrRbrace) throw std::runtime_error("Unexpected EOF after StructExprField");
+        if (commaOrRbrace->value == "}") break;
+
+        if (commaOrRbrace->value == ",") {
+          p.get();
+          auto maybeNext = p.peek();
+          if (maybeNext && maybeNext->value == "}") break;
+          if (maybeNext && maybeNext->value == "..") {
+            p.get();
+            auto expr = p.parseExpression();
+            structBase = std::make_unique<StructBase>(std::move(expr));
+            break;
+          }
+          continue;
+        }
+      }
+
+      structFields = std::make_unique<StructExprFields>(std::move(fields), std::move(structBase));
+    }
+    auto rbrace = p.get();
+    if (!rbrace || rbrace->value != "}") throw std::runtime_error("Expected '}' at end of StructExpression");
+    if (structFields) return std::make_unique<StructExpressionNode>(std::move(pathInExpr), std::move(structFields), token.line, token.column);
+    if (structBase) return std::make_unique<StructExpressionNode>(std::move(pathInExpr), std::move(structBase), token.line, token.column);
+
+    return std::make_unique<StructExpressionNode>(std::move(pathInExpr), token.line, token.column);
+  }
+
+ private:
+  std::unique_ptr<PathInExpression> parse_path_in_expression(parser& p, const Token& firstToken) {
+    std::vector<std::variant<PathInType, Identifier>> segments;
+    if (firstToken.type == TokenType::IDENTIFIER) {
+      segments.push_back(Identifier(firstToken.value));
+    } else {
+      throw std::runtime_error("Expected identifier at start of PathInExpression");
+    }
+    auto delim = p.peek();
+    while (delim && delim->value == "::") {
+      p.get();
+      auto segTok = p.get();
+      if (!segTok || segTok->type != TokenType::IDENTIFIER) throw std::runtime_error("Expected identifier after :: in PathInExpression");
+      segments.push_back(Identifier(segTok->value));
+      delim = p.peek();
+    }
+    return std::make_unique<PathInExpression>(std::move(segments));
+  }
+};
+
+class InfiniteLoopExpressionParselet : public PrefixParselet {
+ public:
+  std::unique_ptr<ExpressionNode> parse(parser& p, const Token& token) override {
+    auto block = p.parseExpression();
+    return std::make_unique<InfiniteLoopExpressionNode>(
+      std::move(block),
+      token.line,
+      token.column
+    );
+  }
+};
+
+class PathOrStructExpressionParselet : public PrefixParselet {
+ public:
+  std::unique_ptr<ExpressionNode> parse(parser& p, const Token& token) override {
+    auto pathInExpr = parse_path_in_expression(p, token);
+
+    auto next = p.peek();
+    // case 1: PathExpression
+    if (!next || next->value != "{") {
+      return std::make_unique<PathExpressionNode>(
+        std::move(pathInExpr),
+        token.line, token.column
+      );
+    }
+
+    // case 2: StructExpression
+    p.get();
+    if (auto maybeRbrace = p.peek(); maybeRbrace && maybeRbrace->value == "}") {
+      p.get();
+      return std::make_unique<StructExpressionNode>(
+        std::move(pathInExpr),
+        token.line, token.column
+      );
+    }
+
+    std::unique_ptr<StructExprFields> structFields = nullptr;
+    std::unique_ptr<StructBase> structBase = nullptr;
+
+    auto next2 = p.peek();
+    if (!next2) throw std::runtime_error("Unexpected EOF in StructExpression body");
+
+    if (next2->value == "..") {
+      p.get();
+      auto expr = p.parseExpression();
+      structBase = std::make_unique<StructBase>(std::move(expr));
+    } else {
+      std::vector<std::unique_ptr<StructExprField>> fields;
+      structBase = nullptr;
+
+      while (true) {
+        auto fieldToken = p.get();
+        if (!fieldToken || (fieldToken->type != TokenType::IDENTIFIER &&
+                            fieldToken->type != TokenType::INTEGER_LITERAL)) {
+          throw std::runtime_error("Expected identifier or tuple index in StructExprField");
+        }
+
+        if (auto colon = p.peek(); colon && colon->value == ":") {
+          p.get(); // consume ':'
+          auto expr = p.parseExpression();
+
+          if (fieldToken->type == TokenType::IDENTIFIER) {
+            Identifier id(fieldToken->value);
+            fields.push_back(std::make_unique<StructExprField>(id, id, std::move(expr)));
+          } else if (fieldToken->type == TokenType::INTEGER_LITERAL) {
+            Identifier fake_id(fieldToken->value);
+            integer_literal idx(fieldToken->value);
+            fields.push_back(std::make_unique<StructExprField>(fake_id, idx, std::move(expr)));
+          }
+        } else {
+          Identifier id(fieldToken->value);
+          auto expr = std::make_unique<PathExpressionNode>(
+            std::make_unique<PathInExpression>(
+              std::vector<std::variant<PathInType, Identifier>>{id}),
+            fieldToken->line, fieldToken->column
+          );
+          fields.push_back(std::make_unique<StructExprField>(id, id, std::move(expr)));
+        }
+
+        auto commaOrRbrace = p.peek();
+        if (!commaOrRbrace) throw std::runtime_error("Unexpected EOF after StructExprField");
+        if (commaOrRbrace->value == "}") break;
+
+        if (commaOrRbrace->value == ",") {
+          p.get();
+          auto maybeNext = p.peek();
+          if (maybeNext && maybeNext->value == "}") break;
+          if (maybeNext && maybeNext->value == "..") {
+            p.get();
+            auto expr = p.parseExpression();
+            structBase = std::make_unique<StructBase>(std::move(expr));
+            break;
+          }
+          continue;
+        }
+      }
+
+      structFields = std::make_unique<StructExprFields>(std::move(fields), std::move(structBase));
+    }
+
+    auto rbrace = p.get();
+    if (!rbrace || rbrace->value != "}") throw std::runtime_error("Expected '}' at end of StructExpression");
+
+    if (structFields)
+      return std::make_unique<StructExpressionNode>(std::move(pathInExpr), std::move(structFields), token.line, token.column);
+    if (structBase)
+      return std::make_unique<StructExpressionNode>(std::move(pathInExpr), std::move(structBase), token.line, token.column);
+
+    return std::make_unique<StructExpressionNode>(std::move(pathInExpr), token.line, token.column);
+  }
+
+ private:
+  std::unique_ptr<PathInExpression> parse_path_in_expression(parser& p, const Token& firstToken) {
+    std::vector<std::variant<PathInType, Identifier>> segments;
+    if (firstToken.type == TokenType::IDENTIFIER) {
+      segments.push_back(Identifier(firstToken.value));
+    } else {
+      throw std::runtime_error("Expected identifier at start of PathInExpression");
+    }
+    auto delim = p.peek();
+    while (delim && delim->value == "::") {
+      p.get(); // consume '::'
+      auto segTok = p.get();
+      if (!segTok || segTok->type != TokenType::IDENTIFIER)
+        throw std::runtime_error("Expected identifier after :: in PathInExpression");
+      segments.push_back(Identifier(segTok->value));
+      delim = p.peek();
+    }
+    return std::make_unique<PathInExpression>(std::move(segments));
+  }
+};
+
+
+class PredicateLoopExpressionParselet : public PrefixParselet {
+ public:
+  std::unique_ptr<ExpressionNode> parse(parser& p, const Token& token) override {
+    auto conditions = parseConditions(p);
+
+    auto block = p.parseExpression();
+    if (!block) {
+      throw std::runtime_error("Expected block expression after while-condition at line " + std::to_string(token.line));
+    }
+
+    return std::make_unique<PredicateLoopExpressionNode>(
+      std::move(conditions),
+      std::move(block),
+      token.line,
+      token.column
+    );
+  }
+
+ private:
+  std::unique_ptr<Conditions> parseConditions(parser& p) {
+    auto next = p.peek();
+    if (next.has_value() && next->type == TokenType::RESERVED_KEYWORD && next->value == "let") {
+      return std::make_unique<Conditions>(parseLetChain(p));
+    }
+
+    auto expr = p.parseExpression(0);
+    if (!expr) throw std::runtime_error("Expected condition expression after while");
+
+    if (isDisallowedCondition(expr)) {
+      throw std::runtime_error("Disallowed expression type in while-condition");
+    }
+
+    return std::make_unique<Conditions>(std::move(expr));
+  }
+
+  LetChain parseLetChain(parser& p) {
+    std::vector<std::unique_ptr<LetChainCondition>> conditions;
+
+    while (true) {
+      auto letTok = p.get();
+      if (!letTok.has_value() || letTok->value != "let") throw std::runtime_error("Expected 'let' in let-chain");
+
+      auto pattern = p.ParsePattern();
+      if (!pattern) throw std::runtime_error("Expected pattern after let");
+
+      auto eqTok = p.get();
+      if (!eqTok.has_value() || eqTok->value != "=") throw std::runtime_error("Expected '=' after pattern in let-chain");
+
+      auto expr = p.parseExpression(0);
+      if (!expr) throw std::runtime_error("Expected scrutinee expression after '=' in let-chain");
+      if (isStructExpression(expr)) {
+        throw std::runtime_error("Struct expression not allowed in let-chain scrutinee");
+      }
+
+      conditions.push_back(std::make_unique<LetChainCondition>(
+        std::move(expr),
+        std::move(pattern)
+      ));
+
+      auto peekTok = p.peek();
+      if (!peekTok.has_value() || !(peekTok->type == TokenType::PUNCTUATION && peekTok->value == "&&"))  break;
+      p.get();
+    }
+    return LetChain(std::move(conditions));
+  }
+
+  bool isStructExpression(const std::unique_ptr<ExpressionNode>& expr) {
+    return is_type<StructExpressionNode, ExpressionNode>(expr);
+  }
+
+  bool isDisallowedCondition(const std::unique_ptr<ExpressionNode>& expr) {
+    return is_type<StructExpressionNode, ExpressionNode>(expr)
+      || is_type<AssignmentExpressionNode, ExpressionNode>(expr)
+      || is_type<CompoundAssignmentExpressionNode, ExpressionNode>(expr)
+      || is_type<LazyBooleanExpressionNode, ExpressionNode>(expr)
+      || is_type<RangeExpr, ExpressionNode>(expr)
+      || is_type<RangeFromExpr, ExpressionNode>(expr)
+      || is_type<RangeInclusiveExpr, ExpressionNode>(expr);
+  }
+};
+
+class IfExpressionParselet : public PrefixParselet {
+public:
+  std::unique_ptr<ExpressionNode> parse(parser& p, const Token& token) override {
+    auto cond = std::make_unique<Conditions>(p.parseExpression(0));
+    auto thenBlock = p.parseExpression();
+
+    std::unique_ptr<BlockExpressionNode> elseBlock = nullptr;
+    std::unique_ptr<IfExpressionNode> elseIf = nullptr;
+
+    auto next = p.peek();
+    if (next && next->type == TokenType::STRICT_KEYWORD && next->value == "else") {
+      p.get();
+      auto afterElse = p.peek();
+      if (afterElse && afterElse->type == TokenType::STRICT_KEYWORD && afterElse->value == "if") {
+        auto elseIfExpr = p.get();
+        elseIf = std::unique_ptr<IfExpressionNode>(
+          static_cast<IfExpressionNode*>(p.parseExpression(0).release())
+        );
+      } else {
+        elseBlock = p.parseBlockExpression();
+      }
+    }
+
+    return std::make_unique<IfExpressionNode>(
+      std::move(cond),
+      std::move(thenBlock),
+      std::move(elseBlock),
+      std::move(elseIf),
+      token.line,
+      token.column
+    );
+  }
+};
+
+class MatchExpressionParselet : public PrefixParselet {
+public:
+  std::unique_ptr<ExpressionNode> parse(parser& p, const Token& token) override {
+    auto scrutinee = p.parseExpression(0);
+
+    auto next = p.get();
+    if (!next || next->type != TokenType::DELIMITER || next->value != "{") {
+      throw std::runtime_error("Expected '{' after match scrutinee");
+    }
+
+    std::vector<std::unique_ptr<MatchArms::match_arms_item>> arms;
+
+    while (true) {
+      auto t = p.peek();
+      if (!t) throw std::runtime_error("Unexpected end of input in match expression");
+      if (t->type == TokenType::DELIMITER && t->value == "}") break;
+
+      auto pattern = p.ParsePattern();
+
+      std::unique_ptr<MatchArmGuard> guard = nullptr;
+      auto maybeIf = p.peek();
+      if (maybeIf && maybeIf->type == TokenType::STRICT_KEYWORD && maybeIf->value == "if") {
+        p.get();
+        auto guardExpr = p.parseExpression(0);
+        guard = std::make_unique<MatchArmGuard>(std::move(guardExpr));
+      }
+
+      auto matchArm = std::make_unique<MatchArm>(std::move(pattern), guard ? std::move(guard->expression) : nullptr);
+
+      auto arrow = p.get();
+      if (!arrow || arrow->type != TokenType::PUNCTUATION || arrow->value != "=>") throw std::runtime_error("Expected '=>' in match arm");
+      auto expr = p.parseExpression(0);
+
+      auto maybeComma = p.peek();
+      if (maybeComma && maybeComma->type == TokenType::PUNCTUATION && maybeComma->value == ",") {
+        p.get();
+      }
+
+      auto item = std::make_unique<MatchArms::match_arms_item>();
+      item->match_arm = std::move(matchArm);
+      item->expression = std::move(expr);
+      arms.push_back(std::move(item));
+    }
+
+    auto close = p.get();
+    if (!close || close->type != TokenType::DELIMITER || close->value != "}") {
+      throw std::runtime_error("Expected '}' at end of match expression");
+    }
+
+    auto matchArms = std::make_unique<MatchArms>(std::move(arms), nullptr);
+
+    return std::make_unique<MatchExpressionNode>(
+      std::move(scrutinee),
+      std::move(matchArms),
+      token.line,
+      token.column
+    );
+  }
+};
+
+class ReturnExpressionParselet : public PrefixParselet {
+public:
+  std::unique_ptr<ExpressionNode> parse(parser& p, const Token& token) override {
+    auto next = p.peek();
+
+    std::unique_ptr<ExpressionNode> expr = nullptr;
+    if (next && !(next->type == TokenType::DELIMITER && (next->value == ";" || next->value == "}"))) {
+      expr = p.parseExpression(0);
+    }
+
+    return std::make_unique<ReturnExpressionNode>(
+      std::move(expr),
+      token.line,
+      token.column
+    );
+  }
+};
+
+class UnderscoreExpressionParselet : public PrefixParselet {
+public:
+  std::unique_ptr<ExpressionNode> parse(parser& p, const Token& token) override {
+    return std::make_unique<UnderscoreExpressionNode>(
+      token.line,
+      token.column
+    );
+  }
+};
+
+/*
+classes for Pratt Parsing (Infix)
+*/
+class InfixParselet {
+ public:
+  double precedence;
+
+  InfixParselet(double p) : precedence(p) {}
+  virtual ~InfixParselet() = default;
+
+  virtual std::unique_ptr<ExpressionNode> parse(
+    std::unique_ptr<ExpressionNode> left,
+    const Token& token,
+    parser& parser
+  ) = 0;
+};
+
+class ArithmeticOrLogicalExpressionNodeParselet : public InfixParselet {
+ public:
+  OperationType type;
+  bool rightAssociative;
+
+  ArithmeticOrLogicalExpressionNodeParselet(OperationType t, double prec, bool rightAssoc = false)
+    : InfixParselet(prec), type(t), rightAssociative(rightAssoc) {}
+
+  std::unique_ptr<ExpressionNode> parse(std::unique_ptr<ExpressionNode> left, const Token& token, parser& p) override {
+    double nextPrec = precedence - (rightAssociative ? 1 : 0);
+    auto right = p.parseExpression(nextPrec);
+    return std::make_unique<ArithmeticOrLogicalExpressionNode>(type, std::move(left), std::move(right), token.line, token.column);
+  }
+};
+
+class ComparisonExpressionNodeParselet : public InfixParselet {
+ public:
+  ComparisonExpressionNodeParselet(double precedence)
+    : InfixParselet(precedence) {}
+
+  std::unique_ptr<ExpressionNode> parse(
+    std::unique_ptr<ExpressionNode> left,
+    const Token& token,
+    parser& p
+  ) override {
+    auto right = p.parseExpression(precedence);
+
+    ComparisonType type;
+    if (token.type == PUNCTUATION) {
+      if (token.value == "==")       type = ComparisonType::EQ;
+      else if (token.value == "!=")  type = ComparisonType::NEQ;
+      else if (token.value == ">")   type = ComparisonType::GT;
+      else if (token.value == "<")   type = ComparisonType::LT;
+      else if (token.value == ">=")  type = ComparisonType::GEQ;
+      else if (token.value == "<=")  type = ComparisonType::LEQ;
+      else {
+        throw std::runtime_error("Unexpected punctuation in ComparisonExpressionNodeParselet: " + token.value);
+      }
+    } else {
+      throw std::runtime_error("Unexpected token type in ComparisonExpressionNodeParselet");
+    }
+
+    return std::make_unique<ComparisonExpressionNode>(
+      type, std::move(left), std::move(right),
+      token.line, token.column
+    );
+  }
+};
+
+class LazyBooleanExpressionParselet : public InfixParselet {
+ public:
+  LazyBooleanExpressionParselet(double precedence)
+    : InfixParselet(precedence) {}
+
+  std::unique_ptr<ExpressionNode> parse(
+    std::unique_ptr<ExpressionNode> left,
+    const Token& token,
+    parser& p
+  ) override {
+    auto right = p.parseExpression(precedence);
+
+    LazyBooleanExpressionNode::LazyBooleanType type;
+    if (token.type == PUNCTUATION) {
+      if (token.value == "&&")      type = LazyBooleanExpressionNode::AND;
+      else if (token.value == "||") type = LazyBooleanExpressionNode::OR;
+      else {
+        throw std::runtime_error("Unexpected punctuation in LazyBooleanExpressionParselet: " + token.value);
+      }
+    } else {
+      throw std::runtime_error("Unexpected token type in LazyBooleanExpressionParselet");
+    }
+
+    return std::make_unique<LazyBooleanExpressionNode>(
+      type,
+      std::move(left),
+      std::move(right),
+      token.line,
+      token.column
+    );
+  }
+};
+
+class TypeCastExpressionParselet : public InfixParselet {
+ public:
+  TypeCastExpressionParselet(double precedence)
+    : InfixParselet(precedence) {}
+
+  std::unique_ptr<ExpressionNode> parse(
+    std::unique_ptr<ExpressionNode> left,
+    const Token& token,
+    parser& p
+  ) override {
+    if (token.type != STRICT_KEYWORD || token.value != "as") throw std::runtime_error("Expected 'as' in TypeCastExpressionParselet");
+    auto type = p.ParseType();
+    return std::make_unique<TypeCastExpressionNode>(
+      std::move(left),
+      std::move(type),
+      token.line,
+      token.column
+    );
+  }
+};
+
+class AssignmentExpressionParselet : public InfixParselet {
+ public:
+  AssignmentExpressionParselet(double precedence)
+    : InfixParselet(precedence) {}
+
+  std::unique_ptr<ExpressionNode> parse(
+    std::unique_ptr<ExpressionNode> left,
+    const Token& token,
+    parser& p
+  ) override {
+    if (token.type != PUNCTUATION || token.value != "=") throw std::runtime_error("Expected '=' in AssignmentExpressionParselet");
+
+    auto right = p.parseExpression(precedence - 1);
+
+    return std::make_unique<AssignmentExpressionNode>(
+      std::move(left), std::move(right),
+      token.line, token.column
+    );
+  }
+};
+
+class CompoundAssignmentExpressionParselet : public InfixParselet {
+ public:
+  CompoundAssignmentExpressionParselet(double precedence)
+    : InfixParselet(precedence) {}
+
+  std::unique_ptr<ExpressionNode> parse(
+    std::unique_ptr<ExpressionNode> left,
+    const Token& token,
+    parser& p
+  ) override {
+    OperationType op;
+
+    if (token.type != PUNCTUATION) throw std::runtime_error("Expected compound assignment operator");
+
+    if (token.value == "+=") op = ADD;
+    else if (token.value == "-=") op = MINUS;
+    else if (token.value == "*=") op = MUL;
+    else if (token.value == "/=") op = DIV;
+    else if (token.value == "%=") op = MOD;
+    else if (token.value == "&=") op = AND;
+    else if (token.value == "|=") op = OR;
+    else if (token.value == "^=") op = XOR;
+    else if (token.value == "<<=") op = SHL;
+    else if (token.value == ">>=") op = SHR;
+    else throw std::runtime_error("Unknown compound assignment operator: " + token.value);
+
+    auto right = p.parseExpression(precedence - 1);
+
+    return std::make_unique<CompoundAssignmentExpressionNode>(
+      op, std::move(left), std::move(right),
+      token.line, token.column
+    );
+  }
+};
+
+class IndexExpressionParselet : public InfixParselet {
+ public:
+  IndexExpressionParselet(double precedence) : InfixParselet(precedence) {}
+
+  std::unique_ptr<ExpressionNode> parse(
+    std::unique_ptr<ExpressionNode> left,
+    const Token& token,
+    parser& p
+  ) override {
+    auto base = std::move(left);
+    auto index = p.parseExpression();
+
+    auto closing = p.get();
+    if (!closing || closing->type != TokenType::PUNCTUATION || closing->value != "]") throw std::runtime_error("Expected closing ']' in index expression");
+
+    return std::make_unique<IndexExpressionNode>(
+      std::move(base), std::move(index),
+      token.line, token.column
+    );
+  }
+};
+
+class TupleIndexingExpressionParselet : public InfixParselet {
+ public:
+  TupleIndexingExpressionParselet(double p) : InfixParselet(p) {}
+
+  std::unique_ptr<ExpressionNode> parse(
+    std::unique_ptr<ExpressionNode> left,
+    const Token& token,
+    parser& p
+  ) override {
+    auto indexToken = p.get();
+    if (!indexToken || indexToken->type != TokenType::INTEGER_LITERAL) throw std::runtime_error("Expected integer literal after '.' for tuple indexing");
+    integer_literal idx(indexToken->value);
+    return std::make_unique<TupleIndexingExpressionNode>(
+      std::move(left),
+      idx,
+      token.line,
+      token.column
+    );
+  }
+};
+
+
+class CallExpressionParselet : public InfixParselet {
+ public:
+  std::unique_ptr<ExpressionNode> parse(
+    std::unique_ptr<ExpressionNode> left,
+    const Token& token,
+    parser& p
+  ) override {
+    std::vector<std::unique_ptr<ExpressionNode>> args;
+
+    auto t = p.peek();
+    if (!t.has_value()) throw std::runtime_error("Unexpected end of input in call expression");
+
+    if (!(t->type == TokenType::PUNCTUATION && t->value == ")")) {
+      while (true) {
+        args.push_back(p.parseExpression(0));
+
+        auto next = p.peek();
+        if (!next.has_value()) throw std::runtime_error("Unexpected end of input in argument list");
+
+        if (next->type == TokenType::PUNCTUATION && next->value == ",") {
+          p.get();
+          continue;
+        } else break;
+      }
+    }
+
+    auto closing = p.get();
+    if (!closing.has_value() || closing->type != TokenType::PUNCTUATION || closing->value != ")") {
+      throw std::runtime_error("Expected ')' after arguments");
+    }
+
+    std::unique_ptr<CallParams> callParams = nullptr;
+    if (!args.empty()) {
+      callParams = std::make_unique<CallParams>(std::move(args));
+    }
+
+    return std::make_unique<CallExpressionNode>(
+      std::move(left), 
+      std::move(callParams), 
+      token.line, token.column
+    );
+  }
+};
+
+class MethodCallExpressionParselet : public InfixParselet {
+public:
+  MethodCallExpressionParselet(double precedence) : InfixParselet(precedence) {}
+
+  std::unique_ptr<ExpressionNode> parse(
+    std::unique_ptr<ExpressionNode> left,
+    const Token& token,
+    parser& p
+  ) override {
+    std::vector<std::unique_ptr<ExpressionNode>> args;
+
+    auto next = p.get();
+    if (!next.has_value() || next->type != IDENTIFIER) throw std::runtime_error("Expected identifier after '.' in method call");
+    Identifier method_name(next->value);
+
+    auto t = p.peek();
+    if (!(t->type == TokenType::PUNCTUATION && t->value == ")")) {
+      while (true) {
+        args.push_back(p.parseExpression(0));
+
+        auto next = p.peek();
+        if (!next.has_value()) throw std::runtime_error("Unexpected end of input in argument list");
+
+        if (next->type == TokenType::PUNCTUATION && next->value == ",") {
+          p.get();
+          continue;
+        } else break;
+      }
+    }
+
+    std::unique_ptr<CallParams> callParams = nullptr;
+    if (!args.empty()) {
+      callParams = std::make_unique<CallParams>(std::move(args));
+    }
+
+    return std::make_unique<MethodCallExpressionNode>(
+      std::move(left),
+      method_name,
+      std::move(callParams),
+      token.line,
+      token.column
+    );
+  }
+};
+
+class FieldExpressionParselet : public InfixParselet {
+public:
+  FieldExpressionParselet(double precedence) : InfixParselet(precedence) {}
+
+  std::unique_ptr<ExpressionNode> parse(
+    std::unique_ptr<ExpressionNode> left,
+    const Token& token,
+    parser& p
+  ) override {
+    auto next = p.get();
+    if (!next.has_value() || next->type != IDENTIFIER) {
+      throw std::runtime_error("Expected identifier after '.' in field access");
+    }
+    Identifier field_name(next->value);
+    return std::make_unique<FieldExpressionNode>(
+      std::move(left),
+      field_name,
+      token.line,
+      token.column
+    );
+  }
+};
+
+class DotExpressionParselet : public InfixParselet {
+public:
+  DotExpressionParselet(double precedence) : InfixParselet(precedence) {}
+
+  std::unique_ptr<ExpressionNode> parse(
+    std::unique_ptr<ExpressionNode> left,
+    const Token& token,
+    parser& p
+  ) override {
+    auto next = p.get();
+    if (!next.has_value()) {
+      throw std::runtime_error("Unexpected end of input after '.'");
+    }
+
+    // tuple indexing
+    if (next->type == TokenType::INTEGER_LITERAL) {
+      integer_literal idx(next->value);
+      return std::make_unique<TupleIndexingExpressionNode>(
+        std::move(left), idx, token.line, token.column
+      );
+    }
+
+    // method call or field
+    if (next->type == TokenType::IDENTIFIER) {
+      Identifier name(next->value);
+
+      // check method call
+      auto peekTok = p.peek();
+      if (peekTok && peekTok->type == TokenType::PUNCTUATION && peekTok->value == "(") {
+        p.get();
+        std::vector<std::unique_ptr<ExpressionNode>> args;
+
+        auto t = p.peek();
+        if (!t.has_value()) throw std::runtime_error("Unexpected end of input in method call");
+
+        if (!(t->type == TokenType::PUNCTUATION && t->value == ")")) {
+          while (true) {
+            args.push_back(p.parseExpression(0));
+
+            auto nextArg = p.peek();
+            if (!nextArg.has_value()) throw std::runtime_error("Unexpected end of input in argument list");
+
+            if (nextArg->type == TokenType::PUNCTUATION && nextArg->value == ",") {
+              p.get();
+              continue;
+            } else break;
+          }
+        }
+
+        auto closing = p.get();
+        if (!closing.has_value() || closing->type != TokenType::PUNCTUATION || closing->value != ")") {
+          throw std::runtime_error("Expected ')' after arguments in method call");
+        }
+
+        std::unique_ptr<CallParams> callParams = nullptr;
+        if (!args.empty()) {
+          callParams = std::make_unique<CallParams>(std::move(args));
+        }
+
+        return std::make_unique<MethodCallExpressionNode>(
+          std::move(left), name, std::move(callParams), token.line, token.column
+        );
+      }
+
+      return std::make_unique<FieldExpressionNode>(
+        std::move(left), name, token.line, token.column
+      );
+    }
+
+    throw std::runtime_error("Unexpected token after '.'");
+  }
+};
+
+
+template<typename Target, typename T>
+bool is_type(const std::unique_ptr<T>& ptr) {
+  return dynamic_cast<Target*>(ptr.get()) != nullptr;
+}
+
+template<typename Base, typename Derived>
+std::unique_ptr<Base> upcast(std::unique_ptr<Derived> derived) {
+  return std::unique_ptr<Base>(static_cast<Base*>(derived.release()));
+}
+
+/*
+Parser
+*/
+
+class parser {
+ private:
+  std::vector<Token> tokens;
+  int pos = 0;
+  std::map<PrefixKey, std::shared_ptr<PrefixParselet>> prefixParselets;
+  std::map<InfixKey, std::shared_ptr<InfixParselet>> infixParselets;
+
+ public:
+  parser(std::vector<Token> tokens) : tokens(std::move(tokens)) {
+    prefixParselets[{CHAR_LITERAL, ""}] = std::make_shared<LiteralParselet>();
+    prefixParselets[{STRING_LITERAL, ""}] = std::make_shared<LiteralParselet>();
+    prefixParselets[{RAW_STRING_LITERAL, ""}] = std::make_shared<LiteralParselet>();
+    prefixParselets[{BYTE_LITERAL, ""}] = std::make_shared<LiteralParselet>();
+    prefixParselets[{BYTE_STRING_LITERAL, ""}] = std::make_shared<LiteralParselet>();
+    prefixParselets[{RAW_BYTE_STRING_LITERAL, ""}] = std::make_shared<LiteralParselet>();
+    prefixParselets[{C_STRING_LITERAL, ""}] = std::make_shared<LiteralParselet>();
+    prefixParselets[{RAW_C_STRING_LITERAL, ""}] = std::make_shared<LiteralParselet>();
+    prefixParselets[{INTEGER_LITERAL, ""}] = std::make_shared<LiteralParselet>();
+    prefixParselets[{FLOAT_LITERAL, ""}] = std::make_shared<LiteralParselet>();
+    prefixParselets[{PUNCTUATION, "-"}] = std::make_shared<NegationExpressionParselet>();
+    prefixParselets[{PUNCTUATION, "!"}] = std::make_shared<NegationExpressionParselet>();
+    prefixParselets[{PUNCTUATION, "("}] = std::make_shared<ParenExpressionParselet>();
+    prefixParselets[{PUNCTUATION, "["}] = std::make_shared<ArrayExpressionParselet>();
+    prefixParselets[{PUNCTUATION, "::"}] = std::make_shared<PathExpressionParselet>();
+    prefixParselets[{IDENTIFIER, ""}] = std::make_shared<PathOrStructExpressionParselet>();
+    prefixParselets[{PUNCTUATION, "<"}] = std::make_shared<PathExpressionParselet>();
+    prefixParselets[{PUNCTUATION, "loop"}] = std::make_shared<InfiniteLoopExpressionParselet>();
+    prefixParselets[{PUNCTUATION, "while"}] = std::make_shared<PredicateLoopExpressionParselet>();
+    prefixParselets[{PUNCTUATION, "if"}] = std::make_shared<IfExpressionParselet>();
+    prefixParselets[{PUNCTUATION, "match"}] = std::make_shared<MatchExpressionParselet>();
+    prefixParselets[{PUNCTUATION, "return"}] = std::make_shared<ReturnExpressionParselet>();
+    prefixParselets[{PUNCTUATION, "_"}] = std::make_shared<UnderscoreExpressionParselet>();
+    infixParselets[{PUNCTUATION, "+"}]  = std::make_shared<ArithmeticOrLogicalExpressionNodeParselet>(10, OperationType::ADD);
+    infixParselets[{PUNCTUATION, "-"}]  = std::make_shared<ArithmeticOrLogicalExpressionNodeParselet>(10, OperationType::MINUS);
+    infixParselets[{PUNCTUATION, "*"}]  = std::make_shared<ArithmeticOrLogicalExpressionNodeParselet>(20, OperationType::MUL);
+    infixParselets[{PUNCTUATION, "/"}]  = std::make_shared<ArithmeticOrLogicalExpressionNodeParselet>(20, OperationType::DIV);
+    infixParselets[{PUNCTUATION, "%"}]  = std::make_shared<ArithmeticOrLogicalExpressionNodeParselet>(20, OperationType::MOD);
+    infixParselets[{PUNCTUATION, "&"}]  = std::make_shared<ArithmeticOrLogicalExpressionNodeParselet>(5, OperationType::AND);
+    infixParselets[{PUNCTUATION, "|"}]  = std::make_shared<ArithmeticOrLogicalExpressionNodeParselet>(4, OperationType::OR);
+    infixParselets[{PUNCTUATION, "^"}]  = std::make_shared<ArithmeticOrLogicalExpressionNodeParselet>(6, OperationType::XOR);
+    infixParselets[{PUNCTUATION, "<<"}] = std::make_shared<ArithmeticOrLogicalExpressionNodeParselet>(15, OperationType::SHL);
+    infixParselets[{PUNCTUATION, ">>"}] = std::make_shared<ArithmeticOrLogicalExpressionNodeParselet>(15, OperationType::SHR);
+    infixParselets[{PUNCTUATION, "="}] = std::make_shared<AssignmentExpressionParselet>(1);
+    infixParselets[{PUNCTUATION, "+="}]  = std::make_shared<CompoundAssignmentExpressionParselet>(1);
+    infixParselets[{PUNCTUATION, "-="}]  = std::make_shared<CompoundAssignmentExpressionParselet>(1);
+    infixParselets[{PUNCTUATION, "*="}]  = std::make_shared<CompoundAssignmentExpressionParselet>(1);
+    infixParselets[{PUNCTUATION, "/="}]  = std::make_shared<CompoundAssignmentExpressionParselet>(1);
+    infixParselets[{PUNCTUATION, "%="}]  = std::make_shared<CompoundAssignmentExpressionParselet>(1);
+    infixParselets[{PUNCTUATION, "&="}]  = std::make_shared<CompoundAssignmentExpressionParselet>(1);
+    infixParselets[{PUNCTUATION, "|="}]  = std::make_shared<CompoundAssignmentExpressionParselet>(1);
+    infixParselets[{PUNCTUATION, "^="}]  = std::make_shared<CompoundAssignmentExpressionParselet>(1);
+    infixParselets[{PUNCTUATION, "<<="}] = std::make_shared<CompoundAssignmentExpressionParselet>(1);
+    infixParselets[{PUNCTUATION, ">>="}] = std::make_shared<CompoundAssignmentExpressionParselet>(1);
+    infixParselets[{PUNCTUATION, "["}] = std::make_shared<IndexExpressionParselet>(30);
+    infixParselets[{PUNCTUATION, "."}] = std::make_shared<DotExpressionParselet>(40);
+    infixParselets[{PUNCTUATION, "("}] = std::make_shared<CallExpressionParselet>(50);
+    
+  };
+
+  std::optional<Token> peek() {
+    if (pos < tokens.size()) return tokens[pos];
+    else return std::nullopt;
+  };
+
+  std::optional<Token> get() {
+    if (pos < tokens.size()) return tokens[pos++];
+    else return std::nullopt;
+  };
+
+  void putback(const Token& t) {
+    if (pos == 0) throw std::runtime_error("putback called at beginning");
+    tokens[--pos] = t;
+  }
+
+  //RangePattern → RangeExclusivePattern | RangeInclusivePattern | RangeFromPattern | RangeToExclusivePattern | RangeToInclusivePattern | ObsoleteRangePattern​1
+  //RangeExclusivePattern → RangePatternBound .. RangePatternBound
+  //RangeInclusivePattern → RangePatternBound ..= RangePatternBound
+  //RangeFromPattern → RangePatternBound ..
+  //RangeToExclusivePattern → .. RangePatternBound
+  //RangeToInclusivePattern → ..= RangePatternBound
+  //ObsoleteRangePattern → RangePatternBound ... RangePatternBound
+  //RangePatternBound → LiteralPattern | PathExpression
+  std::unique_ptr<RangePatternBound> ParseRangePatternBound() {
+    auto tok = peek();
+    if (tok->type == PUNCTUATION && tok->value == "-") {
+      get();
+      tok = peek();
+      if (tok->type == CHAR_LITERAL || tok->type == STRING_LITERAL || tok->type == RAW_STRING_LITERAL 
+        || tok->type == C_STRING_LITERAL || tok->type == RAW_C_STRING_LITERAL || tok->type == INTEGER_LITERAL || tok->type == FLOAT_LITERAL 
+        || (tok->type == STRICT_KEYWORD && (tok->value == "true" || tok->value == "false"))) {
+        get();
+        switch(tok->type) {
+          case(CHAR_LITERAL) : {
+            return std::make_unique<RangePatternBound>(
+              std::make_unique<LiteralExpressionNode>(
+              std::make_unique<char_literal>(tok->value), tok->line, tok->column));
+          }
+          case(STRING_LITERAL) : {
+            return std::make_unique<RangePatternBound>(
+              std::make_unique<LiteralExpressionNode>(
+              std::make_unique<string_literal>(tok->value), tok->line, tok->column));
+          }
+          case(RAW_STRING_LITERAL) : {
+            return std::make_unique<RangePatternBound>(
+              std::make_unique<LiteralExpressionNode>(
+              std::make_unique<raw_string_literal>(tok->value), tok->line, tok->column));
+          }
+          case(C_STRING_LITERAL) : {
+            return std::make_unique<RangePatternBound>(
+              std::make_unique<LiteralExpressionNode>(
+              std::make_unique<c_string_literal>(tok->value), tok->line, tok->column));
+          }
+          case(RAW_C_STRING_LITERAL) : {
+            return std::make_unique<RangePatternBound>(
+              std::make_unique<LiteralExpressionNode>(
+              std::make_unique<raw_c_string_literal>(tok->value), tok->line, tok->column));
+          }
+          case(INTEGER_LITERAL) : {
+            return std::make_unique<RangePatternBound>(
+              std::make_unique<LiteralExpressionNode>(
+              std::make_unique<integer_literal>(tok->value), tok->line, tok->column));
+          }
+          case(FLOAT_LITERAL) : {
+            return std::make_unique<RangePatternBound>(
+              std::make_unique<LiteralExpressionNode>(
+              std::make_unique<float_literal>(tok->value), tok->line, tok->column));
+          }
+          case(STRICT_KEYWORD) : {
+            if (tok->value == "true") return std::make_unique<RangePatternBound>(
+              std::make_unique<LiteralExpressionNode>(
+              std::make_unique<bool>("true"), tok->line, tok->column));
+            else if (tok->value == "false") return std::make_unique<RangePatternBound>(
+              std::make_unique<LiteralExpressionNode>(
+              std::make_unique<bool>("false"), tok->line, tok->column));
+          }
+        }
+      }
+    } else if (tok->type == CHAR_LITERAL || tok->type == STRING_LITERAL || tok->type == RAW_STRING_LITERAL 
+            || tok->type == C_STRING_LITERAL || tok->type == RAW_C_STRING_LITERAL || tok->type == INTEGER_LITERAL || tok->type == FLOAT_LITERAL 
+            || (tok->type == STRICT_KEYWORD && (tok->value == "true" || tok->value == "false"))) {
+      switch (tok->type) {
+        case(CHAR_LITERAL) : {
+          return std::make_unique<RangePatternBound>(
+            std::make_unique<LiteralExpressionNode>(
+            std::make_unique<char_literal>(tok->value), tok->line, tok->column));
+        }
+        case(STRING_LITERAL) : {
+          return std::make_unique<RangePatternBound>(
+            std::make_unique<LiteralExpressionNode>(
+            std::make_unique<string_literal>(tok->value), tok->line, tok->column));
+        }
+        case(RAW_STRING_LITERAL) : {
+          return std::make_unique<RangePatternBound>(
+            std::make_unique<LiteralExpressionNode>(
+            std::make_unique<raw_string_literal>(tok->value), tok->line, tok->column));
+        }
+        case(C_STRING_LITERAL) : {
+          return std::make_unique<RangePatternBound>(
+            std::make_unique<LiteralExpressionNode>(
+            std::make_unique<c_string_literal>(tok->value), tok->line, tok->column));
+        }
+        case(RAW_C_STRING_LITERAL) : {
+          return std::make_unique<RangePatternBound>(
+            std::make_unique<LiteralExpressionNode>(
+            std::make_unique<raw_c_string_literal>(tok->value), tok->line, tok->column));
+        }
+        case(INTEGER_LITERAL) : {
+          return std::make_unique<RangePatternBound>(
+            std::make_unique<LiteralExpressionNode>(
+            std::make_unique<integer_literal>(tok->value), tok->line, tok->column));
+        }
+        case(FLOAT_LITERAL) : {
+          return std::make_unique<RangePatternBound>(
+            std::make_unique<LiteralExpressionNode>(
+            std::make_unique<float_literal>(tok->value), tok->line, tok->column));
+        }
+        case(STRICT_KEYWORD) : {
+          if (tok->value == "true") return std::make_unique<RangePatternBound>(
+            std::make_unique<LiteralExpressionNode>(
+            std::make_unique<bool>("true"), tok->line, tok->column));
+          else if (tok->value == "false") return std::make_unique<RangePatternBound>(
+            std::make_unique<LiteralExpressionNode>(
+            std::make_unique<bool>("false"), tok->line, tok->column));
+        }
+      }
+    } else {
+      PathExpressionParselet parselet;
+      auto node = parselet.parse(*this, *tok);
+
+      auto pathNode = dynamic_cast<PathExpressionNode*>(node.release());
+      if (!pathNode) {
+        throw std::runtime_error("Internal error: Expected PathExpressionNode");
+      }
+      return std::make_unique<RangePatternBound>(std::unique_ptr<PathExpressionNode>(pathNode));
+    }
+  };
+
+  std::unique_ptr<RangePattern> ParseRangePattern() {
+    auto firstTok = peek();
+    if (!firstTok) throw std::runtime_error("Unexpected EOF in range pattern");
+
+    if (firstTok->type == PUNCTUATION && firstTok->value == "..") {
+      get();
+
+      auto next = peek();
+      if (!next || next->type == DELIMITER || next->value == "," || next->value == "}") {
+        auto pat = std::make_unique<RangeToExclusivePattern>();
+        return std::make_unique<RangePattern>(std::move(pat));
+      }
+
+      auto bound = ParseRangePatternBound();
+      auto pat = std::make_unique<RangeToExclusivePattern>(std::move(bound));
+      return std::make_unique<RangePattern>(std::move(pat));
+    }
+
+    if (firstTok->type == PUNCTUATION && firstTok->value == "..=") {
+      get(); // consume `..=`
+      auto bound = ParseRangePatternBound();
+      auto pat = std::make_unique<RangeToInclusivePattern>(std::move(bound));
+      return std::make_unique<RangePattern>(std::move(pat));
+    }
+
+    auto lower = ParseRangePatternBound();
+    auto opTok = peek();
+    if (!opTok || opTok->type != PUNCTUATION) {
+      throw std::runtime_error("Expected '..', '..=', or '...' after RangePatternBound");
+    }
+
+    if (opTok->value == "..") {
+      get();
+      auto maybeUpper = peek();
+      if (!maybeUpper || maybeUpper->value == "," || maybeUpper->value == "}") {
+        auto pat = std::make_unique<RangeFromPattern>(std::move(lower));
+        return std::make_unique<RangePattern>(std::move(pat));
+      } else {
+        auto upper = ParseRangePatternBound();
+        auto pat = std::make_unique<RangeExclusivePattern>(std::move(lower), std::move(upper));
+        return std::make_unique<RangePattern>(std::move(pat));
+      }
+    }
+
+    if (opTok->value == "..=") {
+      get();
+      auto upper = ParseRangePatternBound();
+      auto pat = std::make_unique<RangeInclusivePattern>(std::move(lower), std::move(upper));
+      return std::make_unique<RangePattern>(std::move(pat));
+    }
+
+    if (opTok->value == "...") {
+      get();
+      auto upper = ParseRangePatternBound();
+      auto pat = std::make_unique<ObsoleteRangePattern>(std::move(lower), std::move(upper));
+      return std::make_unique<RangePattern>(std::move(pat));
+    }
+
+    throw std::runtime_error("Invalid range pattern operator: " + opTok->value);
+  }
+
+  std::unique_ptr<PatternWithoutRange> parsePatternWithoutRange() {
+    auto t = peek();
+    if (!t) throw std::runtime_error("unexpected EOF in PatternWithoutRange");
+
+    // LiteralPattern → -? LiteralExpression
+    if (t->type == TokenType::PUNCTUATION && t->value == "-") {
+      get();
+      auto litTok = get();
+      if (!litTok || !(litTok->type == TokenType::CHAR_LITERAL || litTok->type == TokenType::STRING_LITERAL ||
+                       litTok->type == TokenType::RAW_STRING_LITERAL || litTok->type == TokenType::C_STRING_LITERAL ||
+                       litTok->type == TokenType::RAW_C_STRING_LITERAL || litTok->type == TokenType::INTEGER_LITERAL ||
+                       litTok->type == TokenType::FLOAT_LITERAL)) {
+        throw std::runtime_error("expected literal after '-'");
+      }
+      auto lit = std::make_unique<LiteralExpressionNode>(litTok->value);
+      return std::make_unique<PatternWithoutRange>(
+          std::make_unique<LiteralPattern>(true, std::move(lit))
+      );
+    }
+
+    // LiteralPattern without minus
+    if (t->type == TokenType::CHAR_LITERAL || t->type == TokenType::STRING_LITERAL ||
+        t->type == TokenType::RAW_STRING_LITERAL || t->type == TokenType::C_STRING_LITERAL ||
+        t->type == TokenType::RAW_C_STRING_LITERAL || t->type == TokenType::INTEGER_LITERAL ||
+        t->type == TokenType::FLOAT_LITERAL) {
+      get();
+      auto lit = std::make_unique<LiteralExpressionNode>(t->value);
+      return std::make_unique<PatternWithoutRange>(
+          std::make_unique<LiteralPattern>(false, std::move(lit))
+      );
+    }
+
+    // WildcardPattern → _
+    if (t->type == TokenType::PUNCTUATION && t->value == "_") {
+      get();
+      return std::make_unique<PatternWithoutRange>(std::make_unique<WildCardPattern>());
+    }
+
+    // RestPattern → ..
+    if (t->type == TokenType::PUNCTUATION && t->value == "..") {
+      get();
+      return std::make_unique<PatternWithoutRange>(std::make_unique<RestPattern>());
+    }
+
+    // ReferencePattern → (& | &&) mut? PatternWithoutRange
+    if (t->type == TokenType::PUNCTUATION && t->value == "&") {
+      get();
+      int and_count = 1;
+      auto next = peek();
+      if (next && next->type == TokenType::PUNCTUATION && next->value == "&") {
+        get();
+        and_count = 2;
+      }
+      bool if_mut = false;
+      auto maybe_mut = peek();
+      if (maybe_mut && maybe_mut->type == TokenType::RESERVED_KEYWORD && maybe_mut->value == "mut") {
+        get();
+        if_mut = true;
+      }
+      auto pwr = parsePatternWithoutRange();
+      return std::make_unique<PatternWithoutRange>(std::make_unique<ReferencePattern>(and_count, if_mut, std::move(pwr)));
+    }
+
+    // StructPattern / TupleStructPattern / GroupedPattern / TuplePattern
+    if (t->type == TokenType::IDENTIFIER) {
+      auto pathSegments = std::vector<std::string>{t->value};
+      get();
+      auto sep = peek(); 
+      while (sep && sep->type == TokenType::PUNCTUATION && sep->value == "::") {
+        get();
+        auto seg = get();
+        if (!seg || seg->type != TokenType::IDENTIFIER) throw std::runtime_error("Expected identifier after ::");
+        pathSegments.push_back(seg->value);
+        sep = peek();
+      }
+      auto next = peek();
+      if (next && next->type == TokenType::DELIMITER && next->value == "{") {
+        std::vector<std::variant<PathInType, Identifier>> pathSegments;
+
+        auto tok = get();
+        if (!tok || tok->type != TokenType::IDENTIFIER) throw std::runtime_error("Expected identifier at start of StructPattern path");
+
+        pathSegments.push_back(Identifier(tok->value));
+
+        while (true) {
+          auto delim = peek();
+          if (delim && delim->type == TokenType::PUNCTUATION && delim->value == "::") {
+            get();
+            auto segTok = get();
+            if (!segTok || segTok->type != TokenType::IDENTIFIER) throw std::runtime_error("Expected identifier after :: in StructPattern path");
+            pathSegments.push_back(Identifier(segTok->value));
+          } else { break; }
+        }
+      
+        auto path = std::make_unique<PathInExpression>(std::move(pathSegments));
+     
+        get();
+        std::vector<std::unique_ptr<StructPatternField>> fields;
+        bool hasEtCetera = false;
+      
+        while (true) {
+          auto f = peek();
+          if (!f) throw std::runtime_error("Unexpected EOF in StructPattern");
+        
+          if (f->type == TokenType::DELIMITER && f->value == "}") { get(); break; }
+         
+          if (f->type == TokenType::PUNCTUATION && f->value == "..") {
+            get();
+            hasEtCetera = true;
+            continue;
+          }
+         
+          auto idTok = get();
+          if (!idTok || idTok->type != TokenType::IDENTIFIER) throw std::runtime_error("Expected identifier in StructPatternField");
+         
+          std::unique_ptr<Pattern> subPattern = nullptr;
+          auto atTok = peek();
+          if (atTok && atTok->type == TokenType::PUNCTUATION && atTok->value == "@") {
+            get();
+            subPattern = std::move(ParsePattern());
+          }
+         
+          fields.push_back(std::make_unique<StructPatternField>(Identifier{idTok->value}, std::move(subPattern)));
+         
+          auto comma = peek();
+          if (comma && comma->type == TokenType::PUNCTUATION && comma->value == ",") get();
+        }
+      
+        return std::make_unique<PatternWithoutRange>(
+          std::make_unique<StructPattern>(std::move(path), std::move(fields), hasEtCetera)
+        );
+      } else if (next && next->type == TokenType::DELIMITER && next->value == "(") {
+        std::vector<std::variant<PathInType, Identifier>> pathSegments;
+
+        auto tok = get();
+        if (!tok || tok->type != TokenType::IDENTIFIER) throw std::runtime_error("Expected identifier at start of TupleStructPattern path");
+
+        pathSegments.push_back(Identifier(tok->value));
+
+        while (true) {
+          auto delim = peek();
+          if (delim && delim->type == TokenType::PUNCTUATION && delim->value == "::") {
+            get();
+            auto segTok = get();
+            if (!segTok || segTok->type != TokenType::IDENTIFIER) throw std::runtime_error("Expected identifier after :: in TupleStructPattern path");
+            pathSegments.push_back(Identifier(segTok->value));
+          } else { break; }
+        }
+       
+        auto path = std::make_unique<PathInExpression>(std::move(pathSegments));
+       
+        get(); //'('
+        std::vector<std::unique_ptr<Pattern>> patterns;
+       
+        while (true) {
+          auto p = peek();
+          if (!p) throw std::runtime_error("Unexpected EOF in TupleStructPattern");
+          if (p->type == TokenType::DELIMITER && p->value == ")") { get(); break; }
+          patterns.push_back(std::move(ParsePattern()));
+          auto comma = peek();
+          if (comma && comma->type == TokenType::PUNCTUATION && comma->value == ",") {
+            get();
+            continue;
+          }
+        }
+       
+        return std::make_unique<PatternWithoutRange>(
+          std::make_unique<TupleStructPattern>(std::move(path), std::move(patterns))
+        );
+      } else {
+        std::vector<std::variant<PathInType, Identifier>> pathSegments;
+
+        auto tok = get();
+        if (!tok || tok->type != TokenType::IDENTIFIER) throw std::runtime_error("Expected identifier at start of TupleStructPattern path");
+
+        pathSegments.push_back(Identifier(tok->value));
+
+        while (true) {
+          auto delim = peek();
+          if (delim && delim->type == TokenType::PUNCTUATION && delim->value == "::") {
+            get();
+            auto segTok = get();
+            if (!segTok || segTok->type != TokenType::IDENTIFIER) throw std::runtime_error("Expected identifier after :: in TupleStructPattern path");
+            pathSegments.push_back(Identifier(segTok->value));
+          } else { break; }
+        }
+       
+        auto path = std::make_unique<PathInExpression>(std::move(pathSegments));
+        return std::make_unique<PatternWithoutRange>(std::make_unique<PathPattern>(std::move(path)));
+      }
+    }
+
+    // TuplePattern / GroupedPattern → '(' ... ')'
+    if (t->type == TokenType::DELIMITER && t->value == "(") {
+      get();
+      auto next = peek();
+      if (next && next->type == TokenType::DELIMITER && next->value == ")") {
+        get();
+        return std::make_unique<PatternWithoutRange>(std::make_unique<TuplePattern>(std::vector<std::unique_ptr<Pattern>>{}, false));
+      }
+      auto first = ParsePattern();
+      auto comma = peek();
+      if (comma && comma->type == TokenType::PUNCTUATION && comma->value == ",") {
+        // tuple
+        std::vector<std::unique_ptr<Pattern>> items;
+        items.push_back(std::move(first));
+        while (true) {
+          get();
+          auto nxt = peek();
+          if (nxt && nxt->type == TokenType::DELIMITER && nxt->value == ")") { get(); break; }
+          items.push_back(std::move(ParsePattern()));
+        }
+        return std::make_unique<PatternWithoutRange>(std::make_unique<TuplePattern>(std::move(items), false));
+      } else {
+        // grouped
+        if (!peek() || peek()->type != TokenType::DELIMITER || peek()->value != ")")
+          throw std::runtime_error("Expected ')' in GroupedPattern");
+        get();
+        return std::make_unique<PatternWithoutRange>(std::make_unique<GroupedPattern>(std::move(first)));
+      }
+    }
+
+    // SlicePattern → '[' ... ']'
+    if (t->type == TokenType::DELIMITER && t->value == "[") {
+      get();
+      std::vector<std::unique_ptr<Pattern>> items;
+      while (true) {
+        auto nxt = peek();
+        if (!nxt) throw std::runtime_error("Unexpected EOF in SlicePattern");
+        if (nxt->type == TokenType::DELIMITER && nxt->value == "]") { get(); break; }
+        items.push_back(std::move(ParsePattern()));
+        auto comma = peek();
+        if (comma && comma->type == TokenType::PUNCTUATION && comma->value == ",") get();
+      }
+      return std::make_unique<PatternWithoutRange>(std::make_unique<SlicePattern>(std::move(items)));
+    }
+
+    throw std::runtime_error("Unknown pattern starting token: " + t->value);
+  }
+
+  std::unique_ptr<PatternNoTopAlt> ParsePatternNoTopAlt() {
+    auto next = peek();
+    if (!next) throw std::runtime_error("Unexpected EOF while parsing PatternNoTopAlt");
+
+    if (next->type == TokenType::INTEGER_LITERAL || 
+        next->type == TokenType::FLOAT_LITERAL   || 
+        next->type == TokenType::IDENTIFIER      || 
+        (next->type == TokenType::PUNCTUATION && (next->value == ".." || next->value == "..="))) {
+      auto range = ParseRangePattern();
+      if (range) {
+        return std::make_unique<PatternNoTopAlt>(std::move(range));
+      }
+    }
+
+    auto pwr = parsePatternWithoutRange();
+    if (!pwr) throw std::runtime_error("Failed to parse PatternWithoutRange");
+
+    return std::make_unique<PatternNoTopAlt>(std::move(pwr));
+  }
+
+  std::unique_ptr<TypeNode> ParseType() {
+    auto tok = peek();
+    if (!tok) throw std::runtime_error("Unexpected EOF while parsing Type");
+
+    int line = tok->line;
+    int column = tok->column;
+
+    if (tok->value == "(") {
+      auto tupleNode = ParseTupleType();
+      if (tupleNode->types.size() == 1) {
+        return std::make_unique<ParenthesizedTypeNode>(std::move(tupleNode->types[0]), line, column);
+      }
+      return tupleNode;
+    }
+
+    if (tok->value == "[") {
+      auto saved = *tok;
+      get();
+      auto innerType = ParseType();
+      auto next = peek();
+      if (next && next->value == ";") {
+        putback(saved);
+        return ParseArrayType();
+      } else {
+        putback(saved);
+        return ParseSliceType();
+      }
+    }
+
+    if (tok->value == "!") return ParseNeverType();
+    if (tok->value == "_") return ParseInferredType();
+    if (tok->value == "<") return ParseQualifiedPathInType();
+
+    auto typePath = ParseTypePath();
+    return std::make_unique<TypePathNode>(std::move(typePath), line, column);
+  }
+
+  //Statement → ; | Item | LetStatement | ExpressionStatement
+  //LetStatement → let PatternNoTopAlt ( : Type )? ( = Expression | = Expression except LazyBooleanExpression or end with a } else BlockExpression)? ;
+
+  std::unique_ptr<StatementNode> ParseLetStatement() {
+    auto next_token = get();
+    if (next_token == std::nullopt || next_token->type != TokenType::STRICT_KEYWORD || next_token->value != "let") {
+      throw std::runtime_error("Expected 'let' at beginning of let-statement");
+    } 
+    std::unique_ptr<PatternNoTopAlt> pattern = ParsePatternNoTopAlt();
+    if (!pattern) {
+      throw std::runtime_error("Expected pattern after 'let'");
+    }
+    std::unique_ptr<TypeNode> type = nullptr;
+    if (next_token && next_token->type == PUNCTUATION && next_token->value == ":") {
+      get(); // ":"
+      type = ParseType();
+      if (!type) {
+        throw std::runtime_error("Expected type after ':'");
+      }
+    }
+    std::unique_ptr<ExpressionNode> expr = nullptr;
+    next_token = peek();
+    if (next_token && next_token->type == TokenType::PUNCTUATION && next_token->value == "=") {
+      get(); // "="
+      expr = parseExpression();
+      if (!expr) {
+        throw std::runtime_error("Expected expression after '='");
+      } else {
+        next_token = get(); //';'或"else"
+        if (!next_token) { throw std::runtime_error("Expected something after expression"); }
+        if (next_token && next_token->type == TokenType::PUNCTUATION && next_token->value == ";") {
+          int ll = expr->get_l(), cc = expr->get_c();
+          LetStatement let_statement = LetStatement(std::move(pattern), std::move(type), std::move(expr), nullptr);
+          return std::make_unique<StatementNode>(StatementNode(StatementType::LETSTATEMENT, nullptr, std::make_unique<LetStatement>(let_statement), nullptr, ll ,cc));
+        } else {//先检查expression，再parse blockexpression
+          if (!is_type<BlockExpressionNode, ExpressionNode>(expr)) { throw std::runtime_error("Expected expression except LazyBooleanExpression or end with a }"); }
+          std::unique_ptr<ExpressionNode> expr2 = parseExpression();
+          if (!is_type<BlockExpressionNode, ExpressionNode>(expr2)) { throw std::runtime_error("Expected BlockExpression after 'else'"); }
+          next_token = get();
+          if (!next_token || next_token->type != TokenType::PUNCTUATION || next_token->value != ";") {
+            throw std::runtime_error("Expected ';' after block expression");
+          }
+          int ll = expr->get_l(), cc = expr->get_c();
+          std::unique_ptr<BlockExpressionNode> BlockExpr(static_cast<BlockExpressionNode*>(expr2.release()));
+          LetStatement let_statement = LetStatement(std::move(pattern), std::move(type), std::move(expr), std::move(BlockExpr));
+          return std::make_unique<StatementNode>(StatementNode(StatementType::LETSTATEMENT, nullptr, std::make_unique<LetStatement>(let_statement), nullptr, ll ,cc));
+        }
+      }
+    }
+
+    next_token = get();
+    if (!next_token || next_token->type != TokenType::PUNCTUATION || next_token->value != ";") {
+      throw std::runtime_error("Expected ';' at end of let-statement");
+    }
+  };
+
+  std::unique_ptr<ItemNode> ParseItem() {
+    auto tok = peek();
+    if (!tok) return nullptr;
+
+    if (tok->type == TokenType::STRICT_KEYWORD) {
+      if (tok->value == "fn") {
+        return ParseFunctionItem();
+      } else if (tok->value == "struct") {
+        auto v = ParseStructItem();
+        std::unique_ptr<ItemNode> node;
+        if (auto* p = std::get_if<std::unique_ptr<TupleStructNode>>(&v)) {
+          node = std::move(*p);
+        } else if (auto* p = std::get_if<std::unique_ptr<StructStructNode>>(&v)) {
+          node = std::move(*p);
+        }
+        return node;
+      } else if (tok->value == "enum") {
+        return ParseEnumItem();
+      } else if (tok->value == "const") {
+        return ParseConstItem();
+      } else if (tok->value == "impl") {
+        return ParseImplItem();
+      } else if (tok->value == "mod") {
+        return ParseModuleItem();
+      }
+    }
+    throw std::runtime_error("Unknown item");
+  };
+
+  std::unique_ptr<ModuleNode> ParseModuleItem() {
+    auto mod_tok = get();
+    if (!mod_tok || mod_tok->type != TokenType::STRICT_KEYWORD || mod_tok->value != "mod") {
+      throw std::runtime_error("Expected 'mod' at module item");
+    }
+    auto id_tok = get();
+    if (!id_tok || id_tok->type != IDENTIFIER) {
+      throw std::runtime_error("Expected identifier after 'mod'");
+    }
+    std::string module_name = id_tok->value;
+    auto next = peek();
+    if (!next) {
+      throw std::runtime_error("Unexpected end after module name");
+    }
+
+    if (next->type == TokenType::PUNCTUATION && next->value == ";") {
+      get();
+      return std::make_unique<ModuleNode>(module_name, std::vector<std::unique_ptr<ItemNode>>{});
+    } 
+    else if (next->type == TokenType::PUNCTUATION && next->value == "{") {
+      get();
+      std::vector<std::unique_ptr<ItemNode>> items;
+      while (true) {
+        auto maybe = peek();
+        if (!maybe) throw std::runtime_error("Unexpected EOF in module body");
+        if (maybe->type == TokenType::PUNCTUATION && maybe->value == "}") { get(); break; }
+        auto item = ParseItem();
+        if (item) items.push_back(std::move(item));
+      }
+      return std::make_unique<ModuleNode>(module_name, std::move(items));
+    }
+    throw std::runtime_error("Expected ';' or '{' after module name");
+  };
+
+  /*functions used in parsing functions*/
+  FunctionQualifier parseFunctionQualifier() {
+    auto next = peek();
+    FunctionQualifier fq;
+
+    while (next && next->type == TokenType::STRICT_KEYWORD) {
+      if (next->value == "const") {
+        fq.is_const = true; get();
+      } else if (next->value == "async") {
+        fq.is_async = true; get();
+      } else if (next->value == "unsafe") {
+        fq.is_unsafe = true; get();
+      } else if (next->value == "extern") {
+        fq.has_extern = true; get();
+      } else { break; }
+      next = peek();
+    }
+
+    if (next && (next->type == TokenType::STRING_LITERAL || next->type == TokenType::RAW_STRING_LITERAL)) {
+      fq.abi = next->value; get();
+    }
+
+    return fq;
+  }
+
+  //FunctionParameters → SelfParam ,? | ( SelfParam , )? FunctionParam ( , FunctionParam )* ,?
+  std::unique_ptr<FunctionParameter> ParseFunctionParameters() {
+    auto tok = get();
+    if (!tok || tok->value != "(") { throw std::runtime_error("Expected '(' at start of function parameter list"); }
+
+    std::unique_ptr<SelfParam> self_param = nullptr;
+    std::vector<FunctionParam> params;
+
+    tok = peek();
+    if (tok && tok->value == ")") {
+      get(); //  ')'
+      return std::make_unique<FunctionParameter>(2, std::move(params));
+    }
+    
+    bool has_self = false;
+    if (tok && (tok->value == "self" || tok->value == "&" || tok->value == "mut")) {
+      has_self = true;
+      bool if_prefix = false;
+      bool if_mut = false;
+
+      if (tok->value == "&") {
+        if_prefix = true;
+        get(); // &
+        tok = peek();
+      }
+
+      if (tok && tok->value == "mut") {
+        if_mut = true;
+        get(); // mut
+        tok = peek();
+      }
+
+      if (!tok || tok->value != "self") {
+        throw std::runtime_error("Expected 'self' after &?/mut?");
+      }
+      get();
+
+      // TypedSelf: mut? self : Type
+      tok = peek();
+      if (tok && tok->value == ":") {
+        get(); //  :
+        auto type = ParseType();
+        auto typed_self = std::make_unique<TypedSelf>(if_mut, std::move(type));
+        self_param = std::make_unique<SelfParam>(std::move(typed_self));
+      } else {
+        auto shorthand_self = std::make_unique<ShorthandSelf>(if_prefix, if_mut);
+        self_param = std::make_unique<SelfParam>(std::move(shorthand_self));
+      }
+
+      tok = peek();
+      if (tok && tok->value == ",") {
+        get(); // ','
+      }
+    }
+
+    tok = peek();
+    while (tok && tok->value != ")") {
+      auto pattern = ParsePatternNoTopAlt();
+      tok = peek();
+
+      if (tok && tok->value == ":") {
+        get(); // ':'
+        tok = peek();
+        if (tok && tok->value == "...") {
+          get();
+          params.emplace_back(std::make_unique<ellipsis>());
+        } else {
+          auto type = ParseType();
+          auto fpp = std::make_unique<FunctionParamPattern>(std::move(pattern), std::move(type));
+          params.emplace_back(std::move(fpp));
+        }
+      } else {
+        auto type = ParseType();
+        params.emplace_back(std::move(type));
+      }
+
+      tok = peek();
+      if (tok && tok->value == ",") {
+        get(); // ','
+        tok = peek();
+        continue;
+      } else { break; }
+    }
+
+    tok = get();
+    if (!tok || tok->value != ")") {
+      throw std::runtime_error("Expected ')' at end of function parameter list");
+    }
+
+    if (has_self && params.empty()) {
+      return std::make_unique<FunctionParameter>(1, std::move(self_param), std::move(params));
+    } else if (has_self || !params.empty()) {
+      return std::make_unique<FunctionParameter>(2, std::move(self_param), std::move(params));
+    } else {
+      return std::make_unique<FunctionParameter>(2, std::move(params));
+    }
+  }
+
+  std::unique_ptr<FunctionReturnType> ParseFunctionReturnType() {
+    auto return_type = ParseType();
+    return std::make_unique<FunctionReturnType>(std::move(return_type));
+  }
+
+  std::unique_ptr<FunctionNode> ParseFunctionItem() {
+    FunctionQualifier fq = parseFunctionQualifier();
+    auto fn_tok = get();
+    if (!fn_tok || fn_tok->value != "fn") {
+      throw std::runtime_error("Expected 'fn' keyword");
+    }
+    auto id_tok = get();
+    if (!id_tok || id_tok->type != TokenType::IDENTIFIER) {
+      throw std::runtime_error("Expected function identifier after 'fn'");
+    }
+    std::string identifier = id_tok->value;
+ 
+    auto func = std::make_unique<FunctionNode>(fq, identifier, id_tok->line, id_tok->column);
+
+    auto next = peek();
+    if (!next || next->value != "(") {
+      throw std::runtime_error("Expected '(' after function name");
+    }
+    get();
+    func->function_parameter = ParseFunctionParameters();
+    next = peek();
+    if (!next || next->value != ")") {
+      throw std::runtime_error("Expected ')' after parameters");
+    }
+    get();
+
+    next = peek();
+    if (next && next->value == "->") {
+      get();
+      func->return_type = ParseFunctionReturnType();
+    }
+
+    next = peek();
+    if (next && next->value == "{") {
+      func->block_expression = std::unique_ptr<BlockExpressionNode>(static_cast<BlockExpressionNode*>(parseExpression().release()));
+    } else if (next && next->value == ";") {
+      get();
+      func->block_expression = nullptr;
+    } else {
+      throw std::runtime_error("Expected function body or ';'");
+    }
+
+    return func;
+  }
+
+  std::unique_ptr<StructStructNode> ParseStructStruct() {
+    auto kw = get();
+    if (!kw || kw->value != "struct") { throw std::runtime_error("Expected 'struct'"); }
+
+    auto idTok = get();
+    if (!idTok || idTok->type != TokenType::IDENTIFIER) { throw std::runtime_error("Expected identifier after 'struct'"); }
+    std::string identifier = idTok->value;
+
+    auto node = std::make_unique<StructStructNode>(identifier, idTok->line, idTok->column);
+
+    // 判断 { ... } 或 ;
+    auto next = peek();
+    if (!next) throw std::runtime_error("Unexpected EOF after struct declaration");
+
+    if (next->value == ";") {
+      get(); // ';'
+      return node;
+    }
+
+    if (next->value == "{") {
+      get(); // '{'
+      std::vector<std::unique_ptr<StructField>> fields;
+      while (true) {
+        auto tok = peek();
+        if (!tok) throw std::runtime_error("Unexpected EOF in struct fields");
+        if (tok->value == "}") { get(); break; }
+
+        // StructField: IDENTIFIER : Type
+        auto id = get();
+        if (!id || id->type != TokenType::IDENTIFIER) {
+          throw std::runtime_error("Expected identifier in struct field");
+        }
+        auto colon = get();
+        if (!colon || colon->value != ":") {
+          throw std::runtime_error("Expected ':' in struct field");
+        }
+        auto typeNode = ParseType();
+        fields.push_back(std::make_unique<StructField>(id->value, std::move(typeNode)));
+
+        auto sep = peek();
+        if (sep && sep->value == ",") { get(); continue; }
+      }
+      node->struct_fields = std::make_unique<StructFieldNode>(std::move(fields), idTok->line, idTok->column);
+      return node;
+    }
+    throw std::runtime_error("Expected '{' or ';' in struct declaration");
+  }
+
+  std::unique_ptr<TupleStructNode> ParseTupleStruct() {
+    auto kw = get();
+    if (!kw || kw->value != "struct") { throw std::runtime_error("Expected 'struct'"); }
+
+    auto idTok = get();
+    if (!idTok || idTok->type != TokenType::IDENTIFIER) { throw std::runtime_error("Expected identifier after 'struct'"); }
+    std::string identifier = idTok->value;
+
+    auto node = std::make_unique<TupleStructNode>(identifier, idTok->line, idTok->column);
+
+    auto next = peek();
+    if (!next || next->value != "(") { throw std::runtime_error("Expected '(' in tuple struct"); }
+    get(); // '('
+
+    std::vector<std::unique_ptr<TupleField>> fields;
+    while (true) {
+      auto tok = peek();
+      if (!tok) throw std::runtime_error("Unexpected EOF in tuple struct");
+      if (tok->value == ")") { get(); break; }
+
+      //TupleField → Type
+      auto typeNode = ParseType();
+      fields.push_back(std::make_unique<TupleField>(std::move(typeNode)));
+
+      auto sep = peek();
+      if (sep && sep->value == ",") { get(); continue; }
+    }
+
+    node->tuple_fields = std::make_unique<TupleFieldNode>(
+      std::move(fields), idTok->line, idTok->column
+    );
+
+    auto semi = get();
+    if (!semi || semi->value != ";") { throw std::runtime_error("Expected ';' after tuple struct"); }
+
+    return node;
+  }
+
+  std::variant<std::unique_ptr<TupleStructNode>, std::unique_ptr<StructStructNode>> ParseStructItem() {
+    auto tok = get();
+    if (!tok || tok->value != "struct") { throw std::runtime_error("Expected 'struct'"); }
+
+    auto next = peek();
+    if (!next) { throw std::runtime_error("Unexpected end after 'struct'"); }
+
+    if (next->value == "{") { 
+      return ParseStructStruct();
+    } else if (next->value == "(") {
+      return ParseTupleStruct();
+    } else if (next->value == ";") {
+      return ParseStructStruct();
+    } else {
+      throw std::runtime_error("Expected '{', '(' or ';' after struct name");
+    }
+  }
+
+  std::unique_ptr<StatementNode> ParseStatement() {
+    auto next_token = peek();
+
+    if (next_token->type == PUNCTUATION && next_token->value == ";") {
+      return std::make_unique<StatementNode>(StatementNode(StatementType::SEMICOLON, nullptr, nullptr, nullptr, next_token->line, next_token->column));
+    }
+  };  
+
+  std::unique_ptr<TupleFieldNode> ParseTupleFields() {
+    auto startTok = peek();
+    if (!startTok) { throw std::runtime_error("Unexpected EOF while parsing tuple fields"); }
+    int line = startTok->line;
+    int column = startTok->column;
+
+    std::vector<std::unique_ptr<TupleField>> tupleFields;
+
+    while (true) {
+      auto tok = peek();
+      if (!tok || tok->value == ")") break;
+      auto typeNode = ParseType();
+      tupleFields.push_back(std::make_unique<TupleField>(std::move(typeNode)));
+
+      tok = peek();
+      if (!tok) { throw std::runtime_error("Unexpected EOF while parsing tuple fields"); }
+      if (tok->value == ",") {
+        get();
+        if (peek() && peek()->value == ")") break;
+        continue;
+      }
+      else if (tok->value == ")") { break; }
+      else { throw std::runtime_error("Expected ',' or ')' in tuple fields"); }
+    }
+
+    return std::make_unique<TupleFieldNode>(std::move(tupleFields), line, column);
+  }
+
+  std::unique_ptr<StructFieldNode> ParseStructFields() {
+    auto startTok = peek();
+    if (!startTok) {
+      throw std::runtime_error("Unexpected EOF while parsing struct fields");
+    }
+    int line = startTok->line;
+    int column = startTok->column;
+
+    std::vector<std::unique_ptr<StructField>> structFields;
+
+    while (true) {
+      auto tok = peek();
+      if (!tok || tok->value == "}") { break; }
+
+      auto idTok = get();
+      if (!idTok || idTok->type != TokenType::IDENTIFIER) {
+        throw std::runtime_error("Expected identifier in struct field");
+      }
+      std::string identifier = idTok->value;
+
+      tok = peek();
+      if (!tok || tok->value != ":") {
+        throw std::runtime_error("Expected ':' after identifier in struct field");
+      }
+      get(); // ':'
+
+      auto typeNode = ParseType();
+
+      structFields.push_back(std::make_unique<StructField>(identifier, std::move(typeNode)));
+
+      tok = peek();
+      if (!tok) {
+        throw std::runtime_error("Unexpected EOF while parsing struct fields");
+      }
+      if (tok->value == ",") {
+        get();
+        if (peek() && peek()->value == "}") break;
+        continue;
+      }
+      else if (tok->value == "}") { break; }
+      else {
+        throw std::runtime_error("Expected ',' or '}' after struct field");
+      }
+    }
+    return std::make_unique<StructFieldNode>(std::move(structFields), line, column);
+  }
+
+
+  std::unique_ptr<EnumVariantNode> ParseEnumVariant() {
+    auto startTok = peek();
+    if (!startTok) {
+      throw std::runtime_error("Unexpected EOF while parsing EnumVariant");
+    }
+    int line = startTok->line;
+    int column = startTok->column;
+
+    auto nameTok = get();
+    if (!nameTok || nameTok->type != TokenType::IDENTIFIER) {
+      throw std::runtime_error("Expected identifier in enum variant");
+    }
+
+    auto variantNode = std::make_unique<EnumVariantNode>(nameTok->value, line, column);
+
+    auto tok = peek();
+    if (tok) {
+      if (tok->value == "(") {
+        get();
+        auto tupleNode = std::make_unique<EnumVariantTupleNode>(tok->line, tok->column);
+
+        if (peek() && peek()->value != ")") {
+          tupleNode->tuple_field = ParseTupleFields();
+        }
+        tok = peek();
+        if (!tok || tok->value != ")") {
+          throw std::runtime_error("Expected ')' after tuple fields in enum variant");
+        }
+        get(); // ')'
+        variantNode->enum_variant_tuple = std::move(tupleNode);
+      } 
+      else if (tok->value == "{") {
+        get(); // '{'
+        auto structNode = std::make_unique<EnumVariantStructNode>(tok->line, tok->column);
+
+        if (peek() && peek()->value != "}") {
+            structNode->struct_field = ParseStructFields();
+        }
+        tok = peek();
+        if (!tok || tok->value != "}") {
+          throw std::runtime_error("Expected '}' after struct fields in enum variant");
+        }
+        get(); // '}'
+
+        variantNode->enum_variant_struct = std::move(structNode);
+      }
+    }
+
+    tok = peek();
+    if (tok && tok->value == "=") {
+      get();
+      auto expr = parseExpression();
+      variantNode->discriminant = std::make_unique<EnumVariantDiscriminantNode>(std::move(expr), tok->line, tok->column);
+    }
+
+    return variantNode;
+  }
+
+
+  std::unique_ptr<EnumVariantsNode> ParseEnumVariants() {
+    auto startTok = peek();
+    int line = startTok ? startTok->line : 0;
+    int column = startTok ? startTok->column : 0;
+
+    auto node = std::make_unique<EnumVariantsNode>(line, column);
+
+    bool expectVariant = true;
+    while (true) {
+      auto tok = peek();
+      if (!tok) { throw std::runtime_error("Unexpected EOF while parsing enum variants"); }
+      if (tok->value == "}") { break; }
+
+      if (!expectVariant && tok->value != ",") {
+          throw std::runtime_error("Expected ',' or '}' after enum variant");
+      }
+
+      if (expectVariant) {
+        node->enum_variants.push_back(ParseEnumVariant());
+        expectVariant = false;
+      } else {
+        if (tok->value == ",") {
+          get();
+          auto next = peek();
+          if (next && next->value == "}") { break; }
+          expectVariant = true;
+        }
+      }
+      return node;
+    }
+  }
+
+  std::unique_ptr<EnumerationNode> ParseEnumItem() {
+    auto tok = get();
+    if (!tok || tok->value != "enum") { throw std::runtime_error("Expected 'enum'"); }
+
+    auto idTok = get();
+    if (!idTok || idTok->type != TokenType::IDENTIFIER) { throw std::runtime_error("Expected identifier after 'enum'"); }
+
+    auto node = std::make_unique<EnumerationNode>(idTok->value, idTok->line, idTok->column);
+
+    auto brace = get();
+    if (!brace || brace->value != "{") { throw std::runtime_error("Expected '{' after enum name"); }
+
+    auto next = peek();
+    if (next && next->value != "}") { node->enum_variants = ParseEnumVariants(); }
+
+    auto close = get();
+    if (!close || close->value != "}") { throw std::runtime_error("Expected '}' after enum variants"); }
+
+    return node;
+  };
+
+  std::unique_ptr<TupleFieldNode> ParseTupleFields() {
+    auto startTok = peek();
+    if (!startTok) { throw std::runtime_error("Unexpected EOF while parsing tuple fields"); }
+    int line = startTok->line;
+    int column = startTok->column;
+
+    std::vector<std::unique_ptr<TupleField>> tupleFields;
+
+    while (true) {
+      auto tok = peek();
+      if (!tok) {
+        throw std::runtime_error("Unexpected EOF while parsing tuple fields");
+      }
+      if (tok->value == ")") { break; }
+
+      auto typeNode = ParseType();
+      tupleFields.push_back(std::make_unique<TupleField>(std::move(typeNode)));
+
+      tok = peek();
+      if (!tok) {
+        throw std::runtime_error("Unexpected EOF after tuple field");
+      }
+      if (tok->value == ",") {
+        get();
+        if (peek() && peek()->value == ")") break;
+        continue;
+      } else if (tok->value == ")") {
+        break;
+      } else {
+        throw std::runtime_error("Expected ',' or ')' after tuple field");
+      }
+    }
+
+    return std::make_unique<TupleFieldNode>(std::move(tupleFields), line, column);
+  };
+
+  std::unique_ptr<ConstantItemNode> ParseConstItem() {
+    auto tok = get();
+    if (!tok || tok->value != "const") { throw std::runtime_error("Expected 'const' at beginning of constant item"); }
+    int line = tok->line;
+    int column = tok->column;
+
+    auto idTok = get();
+    if (!idTok) { throw std::runtime_error("Unexpected EOF after 'const'"); }
+
+    std::unique_ptr<ConstantItemNode> node;
+    if (idTok->type == TokenType::IDENTIFIER) {
+      node = std::make_unique<ConstantItemNode>(idTok->value, line, column);
+    } else if (idTok->value == "_") {
+      node = std::make_unique<ConstantItemNode>(line, column);
+    } else {
+      throw std::runtime_error("Expected identifier or '_' after 'const'");
+    }
+
+    auto colonTok = get();
+    if (!colonTok || colonTok->value != ":") {
+      throw std::runtime_error("Expected ':' after const name");
+    }
+
+    node->type = ParseType();
+
+    auto eqTok = get();
+    if (!eqTok || eqTok->value != "=") {
+      throw std::runtime_error("Expected '=' after const type");
+    }
+    node->expression = parseExpression();
+    auto semiTok = get();
+    if (!semiTok || semiTok->value != ";") {
+      throw std::runtime_error("Expected ';' after const expression");
+    }
+    return node;
+  }
+
+  std::unique_ptr<ImplementationNode> ParseImplItem() {
+    auto tok = get();
+    if (!tok || tok->value != "impl") {
+      throw std::runtime_error("Expected 'impl' at beginning of implementation");
+    }
+    int line = tok->line;
+    int column = tok->column;
+
+    auto type = ParseType();
+    if (!type) {
+      throw std::runtime_error("Expected type after 'impl'");
+    }
+
+    auto lbraceTok = get();
+    if (!lbraceTok || lbraceTok->value != "{") {
+      throw std::runtime_error("Expected '{' after type in implementation");
+    }
+
+    auto implNode = std::make_unique<ImplementationNode>(std::move(type), line, column);
+
+    while (true) {
+      auto peekTok = peek();
+      if (!peekTok) {
+        throw std::runtime_error("Unexpected EOF while parsing implementation block");
+      }
+      if (peekTok->value == "}") { get(); break; }
+
+      if (peekTok->value == "const") {
+        auto constItem = ParseConstItem();
+        implNode->associated_item.push_back(
+          std::make_unique<AssociatedItemNode>(std::move(constItem), peekTok->line, peekTok->column)
+        );
+      }
+      else if (peekTok->value == "fn") {
+        auto funcItem = ParseFunctionItem();
+        implNode->associated_item.push_back(
+          std::make_unique<AssociatedItemNode>(std::move(funcItem), peekTok->line, peekTok->column)
+        );
+      }
+      else {
+        throw std::runtime_error("Unexpected token in implementation block: " + peekTok->value);
+      }
+    }
+
+    return implNode;
+  }
+
+  std::unique_ptr<ExpressionStatement> parseExpressionStatement() {
+    auto startTok = peek();
+    if (!startTok) {
+      throw std::runtime_error("Unexpected EOF while parsing ExpressionStatement");
+    }
+    int line = startTok->line;
+    int column = startTok->column;
+
+    auto expr = parseExpression();
+
+    bool isBlockExpr = is_type<BlockExpressionNode, ExpressionNode>(expr);
+
+    auto next = peek();
+    if (!isBlockExpr) {
+      if (!next || next->value != ";") {
+        throw std::runtime_error("Expected ';' after expression without block");
+      }
+      get(); // ';'
+    } else {
+      if (next && next->value == ";") {
+        get(); // ';'
+      }
+    }
+    return std::make_unique<ExpressionStatement>(std::move(expr));
+  }
+
+  bool IsItemStart(const Token &tok) {
+    return tok.value == "fn" ||
+           tok.value == "struct" ||
+           tok.value == "enum" ||
+           tok.value == "const" ||
+           tok.value == "impl" ||
+           tok.value == "mod" ||
+           tok.value == "type" ||
+           tok.value == "trait" ||
+           tok.value == "use";
+  }
+
+
+  std::unique_ptr<StatementNode> ParseStatement() {
+    auto tok = peek();
+    if (!tok) {
+      throw std::runtime_error("Unexpected EOF while parsing Statement");
+    }
+    int line = tok->line;
+    int column = tok->column;
+
+    if (tok->value == ";") {
+      get(); // consume ';'
+      return std::make_unique<StatementNode>(StatementType::SEMICOLON, nullptr, nullptr, nullptr, line, column);
+    }
+
+    if (IsItemStart(*tok)) {
+      auto item = ParseItem();
+      return std::make_unique<StatementNode>(StatementType::ITEM, std::move(item), nullptr, nullptr, line, column);
+    }
+
+    if (tok->value == "let") {
+      auto letStmt = ParseLetStatement();
+      return std::make_unique<StatementNode>(StatementType::LETSTATEMENT, nullptr, std::move(letStmt), nullptr, line, column);
+    }
+
+    auto exprStmt = parseExpressionStatement();
+    return std::make_unique<StatementNode>(StatementType::EXPRESSIONSTATEMENT, nullptr, nullptr, std::move(exprStmt), line, column);
+  }
+
+  std::unique_ptr<ParenthesizedTypeNode> ParseParenthesizedType() {
+    auto lparenTok = get();
+    if (!lparenTok || lparenTok->value != "(") {
+      throw std::runtime_error("Expected '(' at start of ParenthesizedType");
+    }
+    int line = lparenTok->line;
+    int column = lparenTok->column;
+
+    auto innerType = ParseType();
+
+    auto rparenTok = get();
+    if (!rparenTok || rparenTok->value != ")") {
+      throw std::runtime_error("Expected ')' after ParenthesizedType");
+    }
+
+    return std::make_unique<ParenthesizedTypeNode>(std::move(innerType), line, column);
+  }
+
+  std::unique_ptr<TupleTypeNode> ParseTupleType() {
+    auto lparenTok = get();
+    if (!lparenTok || lparenTok->value != "(") {
+      throw std::runtime_error("Expected '(' at start of TupleType");
+    }
+    int line = lparenTok->line;
+    int column = lparenTok->column;
+
+    std::vector<std::unique_ptr<TypeNode>> types;
+
+    if (peek()->value == ")") {
+      get();
+      return std::make_unique<TupleTypeNode>(std::move(types), line, column);
+    }
+
+    while (true) {
+      types.push_back(ParseType());
+      auto next = peek();
+      if (!next) throw std::runtime_error("Unexpected EOF in TupleType");
+
+      if (next->value == ",") {
+        get();
+        if (peek()->value == ")") { break; }
+        continue;
+      }
+      break;
+    }
+
+    auto rparenTok = get();
+    if (!rparenTok || rparenTok->value != ")") {
+      throw std::runtime_error("Expected ')' at end of TupleType");
+    }
+
+    return std::make_unique<TupleTypeNode>(std::move(types), line, column);
+  }
+
+  std::unique_ptr<NeverTypeNode> ParseNeverType() {
+    auto tok = get();
+    if (!tok || tok->value != "!") {
+      throw std::runtime_error("Expected '!' for NeverType");
+    }
+    return std::make_unique<NeverTypeNode>(tok->line, tok->column);
+  }
+
+  std::unique_ptr<ArrayTypeNode> ParseArrayType() {
+    auto lbrackTok = get();
+    if (!lbrackTok || lbrackTok->value != "[") {
+      throw std::runtime_error("Expected '[' at start of ArrayType");
+    }
+    int line = lbrackTok->line;
+    int column = lbrackTok->column;
+
+    auto innerType = ParseType();
+
+    auto semiTok = get();
+    if (!semiTok || semiTok->value != ";") {
+      throw std::runtime_error("Expected ';' in ArrayType");
+    }
+
+    auto expr = parseExpression();
+
+    auto rbrackTok = get();
+    if (!rbrackTok || rbrackTok->value != "]") {
+      throw std::runtime_error("Expected ']' at end of ArrayType");
+    }
+
+    return std::make_unique<ArrayTypeNode>(std::move(innerType), std::move(expr), line, column);
+  }
+
+  std::unique_ptr<SliceTypeNode> ParseSliceType() {
+    auto lbrackTok = get();
+    if (!lbrackTok || lbrackTok->value != "[") {
+      throw std::runtime_error("Expected '[' at start of SliceType");
+    }
+    int line = lbrackTok->line;
+    int column = lbrackTok->column;
+
+    auto innerType = ParseType();
+
+    auto rbrackTok = get();
+    if (!rbrackTok || rbrackTok->value != "]") {
+      throw std::runtime_error("Expected ']' at end of SliceType");
+    }
+
+    return std::make_unique<SliceTypeNode>(std::move(innerType), line, column);
+  }
+
+std::unique_ptr<TypePathFn> ParseTypePathFn() {
+    auto lparen = get();
+    if (!lparen || lparen->value != "(") throw std::runtime_error("Expected '(' at start of TypePathFn");
+
+    std::vector<std::unique_ptr<TypeNode>> inputs;
+    if (peek() && peek()->value != ")") {
+      inputs.push_back(ParseType());
+      while (peek() && peek()->value == ",") {
+        get();
+        if (peek() && peek()->value == ")") break;
+        inputs.push_back(ParseType());
+      }
+    }
+
+    auto rparen = get();
+    if (!rparen || rparen->value != ")") throw std::runtime_error("Expected ')' at end of TypePathFn inputs");
+
+    std::unique_ptr<TypeNode> returnType = nullptr;
+    if (peek() && peek()->value == "->") {
+      get();
+      returnType = ParseType();
+      if (!returnType) throw std::runtime_error("Expected TypeNoBounds after '->'");
+    }
+
+    std::unique_ptr<TypePathFnInputs> inputsNode = nullptr;
+    if (!inputs.empty()) inputsNode = std::make_unique<TypePathFnInputs>(std::move(inputs));
+
+    return std::make_unique<TypePathFn>(std::move(inputsNode), std::move(returnType));
+  }
+
+  std::unique_ptr<PathIdentSegment> ParsePathIdentSegment() {
+    auto tok = get();
+    if (!tok) throw std::runtime_error("Unexpected EOF while parsing PathIdentSegment");
+
+    if (tok->type == TokenType::IDENTIFIER) return std::make_unique<PathIdentSegment>(tok->value);
+
+    if (tok->value == "super") return std::make_unique<PathIdentSegment>(PathIdentSegment::PathIdentSegmentType::super);
+    if (tok->value == "self") return std::make_unique<PathIdentSegment>(PathIdentSegment::PathIdentSegmentType::self);
+    if (tok->value == "Self") return std::make_unique<PathIdentSegment>(PathIdentSegment::PathIdentSegmentType::Self);
+    if (tok->value == "crate") return std::make_unique<PathIdentSegment>(PathIdentSegment::PathIdentSegmentType::crate);
+    if (tok->value == "$crate") return std::make_unique<PathIdentSegment>(PathIdentSegment::PathIdentSegmentType::$crate);
+
+    throw std::runtime_error("Invalid token in PathIdentSegment: " + tok->value);
+  }
+
+
+  std::unique_ptr<TypePathSegment> ParseTypePathSegment() {
+    auto startTok = peek();
+    if (!startTok) {
+        throw std::runtime_error("Unexpected EOF while parsing TypePathSegment");
+    }
+    int line = startTok->line;
+    int column = startTok->column;
+
+    auto pathIdentSegment = ParsePathIdentSegment();
+
+    auto next = peek();
+    std::unique_ptr<TypePathFn> typePathFn = nullptr;
+
+    if (next && next->value == "(") {
+        typePathFn = ParseTypePathFn();
+    }
+
+    return std::make_unique<TypePathSegment>(std::move(pathIdentSegment), std::move(typePathFn));
+  }
+
+  std::unique_ptr<TypePath> ParseTypePath() {
+    auto startTok = peek();
+    if (!startTok) { throw std::runtime_error("Unexpected EOF while parsing TypePath"); }
+
+    std::vector<std::unique_ptr<TypePathSegment>> segments;
+
+    if (startTok->value == "::") { get(); }
+
+    segments.push_back(ParseTypePathSegment());
+
+    while (true) {
+      auto next = peek();
+      if (!next || next->value != "::") break;
+      get();
+      segments.push_back(ParseTypePathSegment());
+    }
+    return std::make_unique<TypePath>(std::move(segments));
+  }
+
+
+
+  std::unique_ptr<InferredTypeNode> ParseInferredType() {
+    auto tok = get();
+    if (!tok || tok->value != "_") {
+      throw std::runtime_error("Expected '_' for InferredType");
+    }
+    return std::make_unique<InferredTypeNode>(tok->line, tok->column);
+  }
+
+  std::unique_ptr<QualifiedPathInTypeNode> ParseQualifiedPathInType() {
+    auto ltTok = get();
+    if (!ltTok || ltTok->value != "<") {
+      throw std::runtime_error("Expected '<' at start of QualifiedPathType");
+    }
+    int line = ltTok->line;
+    int column = ltTok->column;
+
+    auto innerType = ParseType();
+
+    std::unique_ptr<TypePath> typePath;
+    if (peek()->value == "as") {
+      get();
+      typePath = ParseTypePath();
+    }
+
+    auto gtTok = get();
+    if (!gtTok || gtTok->value != ">") {
+      throw std::runtime_error("Expected '>' to close QualifiedPathType");
+    }
+
+    std::vector<std::unique_ptr<TypePathSegment>> segments;
+    while (true) {
+      auto tok = peek();
+      if (!tok || tok->value != "::") break;
+      get();
+      segments.push_back(ParseTypePathSegment());
+    }
+
+    return std::make_unique<QualifiedPathInTypeNode>(std::move(innerType), std::move(typePath), std::move(segments), line, column);
+  }
+
+  /*
+  Parse ExpressionNode
+  */
+  std::unique_ptr<ExpressionNode> parseExpression(int ctxPrecedence = 0) {
+    auto prefixToken = get();
+    if (!prefixToken) throw std::runtime_error("Expected prefix for expression");
+
+    Token t = prefixToken.value();
+    auto prefixIt = prefixParselets.find({t.type, t.value});
+    if (prefixIt == prefixParselets.end()) {
+      prefixIt = prefixParselets.find({t.type, ""});
+    }
+    if (prefixIt == prefixParselets.end())  throw std::runtime_error("No prefix parselet for token: " + t.value);
+
+    auto left = prefixIt->second->parse(*this, t);
+
+    while (true) {
+      auto lookahead = peek();
+      if (!lookahead) break;
+
+      Token la = lookahead.value();
+
+      auto infixIt = infixParselets.find({la.type, la.value});
+      if (infixIt == infixParselets.end()) infixIt = infixParselets.find({la.type, ""});
+      if (infixIt == infixParselets.end()) break;
+      auto& infixParselet = infixIt->second;
+      if (infixParselet->precedence <= ctxPrecedence) break;
+      get();
+      left = infixParselet->parse(std::move(left), la, *this);
+    }
+
+    return left;
+  }
+
+  std::unique_ptr<ExpressionWithoutBlockNode> parseExpressionWithoutBlock(int ctxPrecedence = 0) {
+    auto prefixToken = get();
+    if (!prefixToken) throw std::runtime_error("Expected prefix for expression");
+
+    Token t = prefixToken.value();
+    auto prefixIt = prefixParselets.find({t.type, t.value});
+    if (prefixIt == prefixParselets.end()) {
+      prefixIt = prefixParselets.find({t.type, ""});
+    }
+    if (prefixIt == prefixParselets.end())  throw std::runtime_error("No prefix parselet for token: " + t.value);
+
+    auto left = prefixIt->second->parse(*this, t);
+
+    while (true) {
+      auto lookahead = peek();
+      if (!lookahead) break;
+
+      Token la = lookahead.value();
+
+      auto infixIt = infixParselets.find({la.type, la.value});
+      if (infixIt == infixParselets.end()) infixIt = infixParselets.find({la.type, ""});
+      if (infixIt == infixParselets.end()) break;
+      auto& infixParselet = infixIt->second;
+      if (infixParselet->precedence <= ctxPrecedence) break;
+      get();
+      left = infixParselet->parse(std::move(left), la, *this);
+    }
+
+    return std::make_unique<ExpressionWithoutBlockNode>(dynamic_cast<ExpressionWithoutBlockNode*>(left.get()));
+  };
+
+  std::unique_ptr<BlockExpressionNode> parseBlockExpression() {
+    auto tok = get();
+    if (!tok || tok->type != TokenType::DELIMITER || tok->value != "{") {
+      throw std::runtime_error("Expected '{' at start of block expression");
+    }
+  
+    BlockExpressionParselet parselet;
+    auto node = parselet.parse(*this, *tok);
+
+    auto blockNode = dynamic_cast<BlockExpressionNode*>(node.release());
+    if (!blockNode) {
+      throw std::runtime_error("Internal error: Expected BlockExpressionNode");
+    }
+    return std::unique_ptr<BlockExpressionNode>(blockNode);
+  };
+
+  std::unique_ptr<TypePath> ParseTypePath() {
+
+  };
+
+  std::unique_ptr<Pattern> ParsePattern() {
+    auto first = ParsePatternNoTopAlt();
+    if (!first) throw std::runtime_error("Failed to parse first PatternNoTopAlt");
+
+    std::vector<std::unique_ptr<PatternNoTopAlt>> alts;
+    alts.push_back(std::move(first));
+
+    while (true) {
+      auto next = peek();
+      if (!next || next->type != TokenType::PUNCTUATION || next->value != "|") break;
+      get();
+
+      auto alt = ParsePatternNoTopAlt();
+      if (!alt) throw std::runtime_error("Failed to parse PatternNoTopAlt after '|'");
+      alts.push_back(std::move(alt));
+    }
+
+    return std::make_unique<Pattern>(std::move(alts));
+  }
+
+  std::vector<std::unique_ptr<ASTNode>> parse() {
+    std::vector<std::unique_ptr<ASTNode>> ast;
+    while (true) {
+      auto tok = peek();
+      if (!tok) break; // token 读完了
+
+      std::unique_ptr<ASTNode> node;
+
+      try {
+        node = std::move(upcast<ASTNode>(ParseItem()));
+      } catch (...) {
+        node = nullptr;
+      }
+
+      if (!node) {
+        try {
+          node = std::move(upcast<ASTNode>(ParseStatement()));
+        } catch (...) {
+          node = nullptr;
+        }
+      }
+
+      if (!node) {
+        try {
+          node = std::move(upcast<ASTNode>(parseExpression()));
+        } catch (...) {
+          node = nullptr;
+        }
+      }
+
+      if (!node) throw std::runtime_error("Cannot parse token at line " + std::to_string(tok->line));
+      ast.push_back(std::move(node));
+    }
+    return ast;
+  }
+
+};  
 #endif

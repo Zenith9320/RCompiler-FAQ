@@ -30,7 +30,7 @@ boost::regex float_literal_regex(R"foo((?:[0-9](?:[0-9_]*))\.(?![._a-zA-Z])|(?:[
 
 boost::regex lifetime_regex(R"foo('(?:_|[a-zA-Z_][a-zA-Z0-9_]*|r#(?!crate|self|super|Self\b)[a-zA-Z_][a-zA-Z0-9_]*|_)(?!'))foo");
 
-boost::regex punctuation_regex(R"foo((==|!=|<=|>=|&&|\|\||<<=|>>=|\+=|-=|\*=|/=|%=|\^=|&=|\|=|<<|>>|::|->|<-|=>|\.\.=|\.{2}|…|[=<>!~+\-*/%^&|@.,，;；:：#$?_{}\[\]\(\)]))foo");
+boost::regex punctuation_regex(R"foo((==|!=|<=|>=|&&|\|\||<<=|>>=|\+=|-=|\*=|/=|%=|\^=|&=|\|=|<<|>>|::|->|<-|=>|\.{3}|\.\.=|\.{2}|…|[=<>!~+\-*/%^&|@.,，;；:：#$?_{}\[\]\(\)]))foo");
 
 boost::regex delimiter_regex(R"foo([{}\[\]\(\)])foo");
 
@@ -59,9 +59,8 @@ std::vector<TokenRule> type_rules = {
   TokenRule(TokenType::RAW_BYTE_STRING_LITERAL, raw_byte_string_regex),
   TokenRule(TokenType::C_STRING_LITERAL, c_str_regex),
   TokenRule(TokenType::RAW_C_STRING_LITERAL, raw_c_str_regex),
-  TokenRule(TokenType::INTEGER_LITERAL, int_literal_regex),
   TokenRule(TokenType::FLOAT_LITERAL, float_literal_regex),
-  TokenRule(TokenType::LIFETIME, lifetime_regex),
+  TokenRule(TokenType::INTEGER_LITERAL, int_literal_regex),
   TokenRule(TokenType::PUNCTUATION, punctuation_regex),
   TokenRule(TokenType::DELIMITER, delimiter_regex),
   TokenRule(TokenType::RESERVED_TOKEN, reserved_token_regex)
