@@ -2,7 +2,7 @@
 
 boost::regex keyword_regex(R"(\b(as|break|const|continue|crate|else|enum|extern|false|fn|for|if|impl|in|let|loop|match|mod|move|mut|pub|ref|return|self|Self|static|use|where|while|struct|super|trait|true|type|unsafe|async|await|dyn|abstract|become|box|do|final|macro|override|priv|typeof|unsized|virtual|yield|try|gen|macro_rules|raw|safe|union)\b)");
 
-boost::regex strict_keyword_regex(R"(\b(as|break|const|continue|crate|else|enum|extern|false|fn|for|if|impl|in|let|loop|match|mod|move|mut|pub|ref|return|self|Self|static|use|where|while|struct|super|trait|true|type|unsafe|async|await|dyn)\b)");
+boost::regex strict_keyword_regex(R"(\b(as|break|const|continue|crate|else|enum|extern|false|fn|for|if|impl|in|let|loop|match|mod|move|mut|pub|ref|return|Self|static|use|where|while|struct|super|trait|true|type|unsafe|async|await|dyn)\b)");
 
 boost::regex reserved_keyword_regex(R"(\b(abstract|become|box|do|final|macro|override|priv|typeof|unsized|virtual|yield|try|gen)\b)");
 
@@ -70,32 +70,48 @@ lexer::lexer(const std::string &src) : input(src), pos(0), line(1), column(1) {}
 
 void lexer::skip_comment() {
   int length = input.size();
-  if (pos + 1 >= length) return;
-  if (input[pos] == '/' && input[pos + 1] == '/') {
-    pos += 2;
-    while (pos < length && input[pos] != '\n') pos++;
-    if (pos < length && input[pos] == '\n') {
-      pos++;
-      line++;
-      column = 1;
-    }
-  } else if (input[pos] == '/' && input[pos + 1] == '*') {
-    pos += 2;
-    while (pos + 1 < length) {
-      if (input[pos] == '*' && input[pos + 1] == '/') {
-        pos += 2;
-        break;
-      }
-      if (input[pos] == '\n') {
+
+  while (pos + 1 < length) {
+    if (input[pos] == '/' && input[pos + 1] == '/') {
+      pos += 2;
+      while (pos < length && input[pos] != '\n') pos++;
+      if (pos < length && input[pos] == '\n') {
+        pos++;
         line++;
         column = 1;
-      } else {
-        column++;
       }
-      pos++;
+      continue;
     }
+
+    else if (input[pos] == '/' && input[pos + 1] == '*') {
+      pos += 2;
+      bool closed = false;
+      while (pos < length) {
+        if (pos + 1 < length && input[pos] == '*' && input[pos + 1] == '/') {
+          pos += 2;
+          closed = true;
+          break;
+        }
+        if (input[pos] == '\n') {
+          line++;
+          column = 1;
+        } else {
+          column++;
+        }
+        pos++;
+      }
+
+      if (!closed) {
+        std::cerr << "Warning: unterminated block comment at line "
+                  << line << ", column " << column << std::endl;
+        return;
+      }
+      continue;
+    }
+    else break;
   }
 }
+
 
 void lexer::skip_whitespace() {
   while (pos < input.size()) {
