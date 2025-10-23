@@ -77,13 +77,16 @@ void lexer::skip_comment() {
       while (pos < length && input[pos] != '\n') pos++;
       if (pos < length && input[pos] == '\n') {
         pos++;
+        while (input[pos] == ' ') pos++;
         line++;
         column = 1;
       }
+      while (input[pos] == '\n' || input[pos] == '\t' || input[pos] == ' ') {
+        pos++;
+        if (input[pos] == '\n') line++;
+      }
       continue;
-    }
-
-    else if (input[pos] == '/' && input[pos + 1] == '*') {
+    } else if (input[pos] == '/' && input[pos + 1] == '*') {
       pos += 2;
       bool closed = false;
       while (pos < length) {
@@ -107,8 +110,9 @@ void lexer::skip_comment() {
         return;
       }
       continue;
+    } else {
+      break;
     }
-    else break;
   }
 }
 
@@ -176,6 +180,12 @@ std::vector<Token> lexer::tokenize() {
 }
 
 void lexer::output(std::vector<Token> res) {
+  //for (int i = 0; i < input.size(); i++) {
+  //  if (input[i] == '\n') std::cout << "\\n" << std::endl;
+  //  else if (input[i] == ' ') std::cout << "空格" << std::endl;
+  //  else if (input[i] == '\t') std::cout << "\\t" << std::endl;
+  //  else std::cout << input[i] << std::endl;
+  //}
   for (int i = 0; i < res.size(); i++) {
     std::cout << '{' ;
     switch(res[i].type) {
