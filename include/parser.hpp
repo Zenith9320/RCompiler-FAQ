@@ -46,7 +46,7 @@ enum NodeType {
   TypeCastExpression, AssignmentExpression, CompoundAssignmentExpression, GroupedExpression, ArrayExpression, IndexExpression, TupleExpression, TupeIndexingExpression, StructExpression,
   CallExpression, MethodCallExpression, FieldExpression, InfiniteLoopExpression, PredicateLoopExpression, LoopExpression, IfExpression, MatchExpression, ReturnExpression, UnderscoreExpression,
   ParenthesizedType, TypePath_node, TupleType, NeverType, ArrayType, SliceType, InferredType, QualifiedPathInType, Statement, PathExpression, ReferenceType, InherentImplementation, TraitImplementation,
-  BreakExpression
+  BreakExpression, ContinueExpression
 };
 
 //运算类型
@@ -284,6 +284,18 @@ class ReferenceTypeNode : public TypeNode {
   }
 };
 
+bool is_type_mutable(TypeNode* type) {
+  if (auto* paren = dynamic_cast<ParenthesizedTypeNode*>(type)) {
+    return is_type_mutable(paren->type.get());
+  } else if (auto* ref = dynamic_cast<ReferenceTypeNode*>(type)) {
+    return ref->if_mut;
+  } else if (auto* slice = dynamic_cast<SliceTypeNode*>(type)) {
+    return is_type_mutable(slice->type.get());
+  } else {
+    return false;
+  }
+}
+
 /*
 null statement
 */
@@ -412,11 +424,11 @@ struct FunctionReturnType {
 struct FunctionParameter {
   int type = 0; // 1 for only SelfParam, 2 for having FunctionParam
   std::unique_ptr<SelfParam> self_param;
-  std::vector<FunctionParam> function_params;
+  std::vector<std::unique_ptr<FunctionParam>> function_params;
 
   FunctionParameter() = default;
-  FunctionParameter(int t, std::vector<FunctionParam> fp) : type(t), function_params(std::move(fp)) {};
-  FunctionParameter(int t, std::unique_ptr<SelfParam> sp, std::vector<FunctionParam> fp) : type(t), self_param(std::move(sp)), function_params(std::move(fp)) {};
+  FunctionParameter(int t, std::vector<std::unique_ptr<FunctionParam>> fp) : type(t), function_params(std::move(fp)) {};
+  FunctionParameter(int t, std::unique_ptr<SelfParam> sp, std::vector<std::unique_ptr<FunctionParam>> fp) : type(t), self_param(std::move(sp)), function_params(std::move(fp)) {};
 
   bool is_selfParam_mut() const {
     if (!self_param) return false;
@@ -1372,6 +1384,12 @@ public:
   }
 };
 
+//ContinueExpression → continue
+class ContinueExpressionNode : public ExpressionNode {
+  public:
+   ContinueExpressionNode(int l, int c) : ExpressionNode(NodeType::ContinueExpression, l, c) {};
+};
+
 //LiteralExpression → CHAR_LITERAL | STRING_LITERAL | RAW_STRING_LITERAL | C_STRING_LITERAL | RAW_C_STRING_LITERAL | INTEGER_LITERAL | FLOAT_LITERAL | true | false
 class LiteralExpressionNode : public ExpressionNode {
  public:
@@ -1415,7 +1433,6 @@ class BreakExpressionNode : public ExpressionNode {
   BreakExpressionNode(std::unique_ptr<ExpressionNode> e, int l, int c) : expr(std::move(e)), ExpressionNode(NodeType::BreakExpression, l, c) {};
 };
 
-class UnderscoredExpressionNode;
 class PathExpressionNode;
 class OperatorExpressionNode;
 class GroupedExpressionNode;
@@ -1431,6 +1448,8 @@ class RangeExpressionNode;
 class ReturnExpressionNode;
 class UnderscoreExpressionNode;
 class LazyBooleanExpressionNode;
+class ArithmeticOrLogicalExpressionNode;
+class TypeCastExpressionNode;
 
 
 //ExpressionWithoutBlock → LiteralExpression | PathExpression | OperatorExpression | GroupedExpression | ArrayExpression | AwaitExpression
@@ -1440,9 +1459,9 @@ class LazyBooleanExpressionNode;
 class ExpressionWithoutBlockNode : public ExpressionNode {
  public:
   std::variant<std::unique_ptr<LiteralExpressionNode>, std::unique_ptr<PathExpressionNode>, std::unique_ptr<OperatorExpressionNode>,
-              std::unique_ptr<GroupedExpressionNode>, std::unique_ptr<ArrayExpressionNode>, std::unique_ptr<IndexExpressionNode>, 
-              std::unique_ptr<TupleExpressionNode>, std::unique_ptr<TupleIndexingExpressionNode>, std::unique_ptr<StructExpressionNode>,
-              std::unique_ptr<CallExpressionNode>, std::unique_ptr<MethodCallExpressionNode>, std::unique_ptr<FieldExpressionNode>, 
+              std::unique_ptr<GroupedExpressionNode>, std::unique_ptr<ArrayExpressionNode>, std::unique_ptr<IndexExpressionNode>, std::unique_ptr<TypeCastExpressionNode>,
+              std::unique_ptr<TupleExpressionNode>, std::unique_ptr<TupleIndexingExpressionNode>, std::unique_ptr<StructExpressionNode>, std::unique_ptr<BreakExpressionNode>,
+              std::unique_ptr<CallExpressionNode>, std::unique_ptr<MethodCallExpressionNode>, std::unique_ptr<FieldExpressionNode>, std::unique_ptr<ArithmeticOrLogicalExpressionNode>,
               std::unique_ptr<RangeExpressionNode>, std::unique_ptr<ReturnExpressionNode>, std::unique_ptr<UnderscoreExpressionNode>, std::unique_ptr<LazyBooleanExpressionNode>> expr;
 
   template <typename T>
@@ -2195,7 +2214,7 @@ class PatternNoTopAlt {
 };
 
 bool LetStatement::get_if_mutable() {
-  return std::visit([](auto const& ptr) -> bool {
+  auto if_mut_pattern = std::visit([](auto const& ptr) -> bool {
     if (!ptr) return true;
     
     using T = std::decay_t<decltype(ptr)>;
@@ -2205,6 +2224,9 @@ bool LetStatement::get_if_mutable() {
         using InnerT = std::decay_t<decltype(innerPtr)>;
         if constexpr (std::is_same_v<InnerT, std::unique_ptr<IdentifierPattern>>) {
           return innerPtr->if_mut;
+        } else if constexpr (std::is_same_v<InnerT, std::unique_ptr<ReferencePattern>>) {
+          std::cout << "getting reference pattern in letstatement" << std::endl;
+          return innerPtr->if_mut;
         } else {
           return true;
         }
@@ -2213,6 +2235,8 @@ bool LetStatement::get_if_mutable() {
       return true;
     }
   }, pattern->pattern);
+  if (if_mut_pattern) return true;
+  return is_type_mutable(type.get()); 
 }
 
 //Pattern → |? PatternNoTopAlt ( | PatternNoTopAlt )*
@@ -2308,6 +2332,26 @@ class Conditions {
 
   template<typename T>
   Conditions(T con) : condition(std::move(con)) {};
+  
+  bool check() {
+    if (std::holds_alternative<LetChain>(condition)) {
+      return true;
+    }
+   
+    auto& expr_ptr = std::get<std::unique_ptr<ExpressionNode>>(condition);
+    ExpressionNode* expr = expr_ptr.get();
+   
+    auto* grouped = dynamic_cast<GroupedExpressionNode*>(expr);
+    if (!grouped) return false;
+   
+    if (!grouped->expression) return false;
+
+    if (auto* assign = dynamic_cast<AssignmentExpressionNode*>(grouped->expression.get())) {
+      std::cout << "assignment not allowed in conditions" << std::endl;
+      return false;
+    }
+    return true;
+  }
 };
 
 //InfiniteLoopExpression → loop BlockExpression
@@ -2407,10 +2451,10 @@ class IfExpressionNode : public ExpressionNode {
   std::unique_ptr<Conditions> conditions;
   std::unique_ptr<BlockExpressionNode> block_expression;
   std::unique_ptr<BlockExpressionNode> else_block;
-  ExpressionNode* else_if;
+  std::unique_ptr<ExpressionNode> else_if;
 
-  IfExpressionNode(std::unique_ptr<Conditions> con, std::unique_ptr<BlockExpressionNode> be, std::unique_ptr<BlockExpressionNode> eb, ExpressionNode* ei, int l, int c)
-                : conditions(std::move(con)), block_expression(std::move(be)), else_block(std::move(eb)), else_if(ei), ExpressionNode(NodeType::IfExpression, l, c) {}
+  IfExpressionNode(std::unique_ptr<Conditions> con, std::unique_ptr<BlockExpressionNode> be, std::unique_ptr<BlockExpressionNode> eb, std::unique_ptr<ExpressionNode> ei, int l, int c)
+                : conditions(std::move(con)), block_expression(std::move(be)), else_block(std::move(eb)), else_if(std::move(ei)), ExpressionNode(NodeType::IfExpression, l, c) {}
 
   bool check() {
     if (conditions == nullptr || block_expression == nullptr) return false;
@@ -2682,6 +2726,14 @@ class parser {
   std::unique_ptr<FunctionNode> ParseFunctionItemInImpl(const std::string& impl_type_name);
 };
 
+class ContinueExpressionParselet : public PrefixParselet {
+ public:
+  std::unique_ptr<ExpressionNode> parse(parser& p, const Token& token) override {
+    p.get();
+    return std::make_unique<ContinueExpressionNode>(token.line, token.column);
+  }
+};
+
 class LiteralParselet : public PrefixParselet {
  public:
   std::unique_ptr<ExpressionNode> parse(parser& p, const Token& token) override {
@@ -2729,36 +2781,80 @@ class BlockExpressionParselet : public PrefixParselet {
     int line = token.line;
     int col = token.column;
 
+    std::cout << "begin parsing block expression" << std::endl;
     std::vector<std::unique_ptr<StatementNode>> statements;
     std::unique_ptr<ExpressionWithoutBlockNode> expr = nullptr;
 
-    auto next = p.peek();
-    if (next && next->type == DELIMITER && next->value == "}") {
-      p.get();
-      return std::make_unique<BlockExpressionNode>(line, col);
-    }
+    auto pre_pos = p.get_pos();
 
-    while (true) {
-      auto tok = p.peek();
-      if (!tok) throw std::runtime_error("Unterminated block expression");
+    try {
+      while (true) {
+        auto next = p.peek();
+        if (!next.has_value()) {
+          throw std::runtime_error("Unexpected end of input inside block");
+        }
+        if (next->value == "}") break;
 
-      if (tok->type == DELIMITER && tok->value == "}") { p.get(); break; }
-      auto stmt = p.ParseStatement();
-      if (stmt) {
-        statements.push_back(std::move(stmt));
-        continue;
+        auto pos_before_parsing = p.get_pos();
+
+        bool if1 = true;
+        bool if2 = true;
+
+        //try parsing statement
+        try {
+          std::cout << "ParseStatement in BlockExpression" << std::endl;
+          auto stmt = p.ParseStatement();
+          if (stmt) {
+            statements.push_back(std::move(stmt));
+            continue;
+          }
+        } catch (const std::exception& e) {
+          std::cerr << "ParseStatement failed at line "
+                    << next->line << ", col " << next->column
+                    << ": " << e.what() << std::endl;
+          std::cout << "roll back after failing parsing statement" << std::endl;
+          p.roll_back(pos_before_parsing);
+          if1 = false;
+        }
+
+        //try parsing expression wothout block
+        try {
+          expr = p.parseExpressionWithoutBlock();
+          if (!expr) {
+            throw std::runtime_error("expression parsing failed");
+          } else {
+            std::cout << "getting expression without block, block expression parsing finished" << std::endl;
+            break;
+          }
+        } catch (const std::exception& e) {
+          std::cerr << "parseExpressionWithoutBlock failed at line "
+                    << next->line << ", col " << next->column
+                    << ": " << e.what() << std::endl;
+          std::cout << "roll back after failing parsing expression" << std::endl;
+          p.roll_back(pos_before_parsing);
+          if2 = false;
+        }
+
+        if (!if1 && !if2) {
+          std::cerr << "error in parsing block expression: unknown thing" << std::endl;
+          throw std::runtime_error("unable to parse something in blockexpression");
+        }
       }
-
-      auto exprCandidate = p.parseExpressionWithoutBlock();
-      if (exprCandidate) {
-        expr = std::move(exprCandidate);
-        auto close = p.get();
-        if (!close || close->type != DELIMITER || close->value != "}") throw std::runtime_error("Expected '}' after block expression");
-        break;
-      }
-      throw std::runtime_error("Unexpected token in block expression at line " + std::to_string(tok->line));
+    } catch (const std::exception& e) {
+      std::cerr << "[ParseBlockExpressionError] : " << e.what() << std::endl;
+      throw std::runtime_error("error in parsing block expression");
     }
-    return std::make_unique<BlockExpressionNode>(std::move(statements), std::move(expr), line, col);
+    auto close = p.get();
+    if (!close.has_value() || close->value != "}") {
+      throw std::runtime_error("Expected '}' to close block");
+    }
+    std::cout << "finish parsing blockexpression" << std::endl;
+    std::cout << "next token: " << p.peek()->value << std::endl;
+    return std::make_unique<BlockExpressionNode>(
+      std::move(statements),
+      std::move(expr),
+      line, col
+    );
   }
 };
 
@@ -2807,7 +2903,7 @@ class BorrowExpressionParselet : public PrefixParselet {
 class DereferenceExpressionParselet : public PrefixParselet {
  public:
   std::unique_ptr<ExpressionNode> parse(parser& p, const Token& token) override {
-    auto expr = p.parseExpression();
+    auto expr = p.parseExpression(5.0);
     return std::make_unique<DereferenceExpressionNode>(
       std::move(expr),
       token.line, token.column
@@ -2829,7 +2925,7 @@ class NegationExpressionParselet : public PrefixParselet {
       throw std::runtime_error("Unexpected token for NegationExpression: " + token.value);
     }
 
-    auto expr = p.parseExpression();
+    auto expr = p.parseExpression(25);
 
     return std::make_unique<NegationExpressionNode>(
       negType, std::move(expr),
@@ -2964,6 +3060,7 @@ public:
 class BreakExpressionParselet : public PrefixParselet {
  public:
   std::unique_ptr<ExpressionNode> parse(parser& p, const Token& token) override {
+    std::cout << "parsing break expression" << std::endl;
     std::unique_ptr<ExpressionNode> value = nullptr;
     auto next = p.peek();
     if (next && !(next->type == PUNCTUATION && next->value == ";")) {
@@ -2981,6 +3078,7 @@ class BreakExpressionParselet : public PrefixParselet {
 class PathExpressionParselet : public PrefixParselet {
  public:
   std::unique_ptr<ExpressionNode> parse(parser& p, const Token& token) override {
+    std::cout << "parsing pathexpression" << std::endl;
     if (token.type == TokenType::PUNCTUATION && token.value == "<") {
       auto typeNode = p.ParseType();
       std::unique_ptr<TypePath> typePath = nullptr;
@@ -3046,11 +3144,14 @@ class PathExpressionParselet : public PrefixParselet {
     }
 
     if (t.type == TokenType::IDENTIFIER) return Identifier(t.value);
-    if (t.type == TokenType::RESERVED_KEYWORD) {
+    if (t.type == TokenType::STRICT_KEYWORD) {
       if (t.value == "super") return PathInType::SUPER;
       if (t.value == "self")  return PathInType::self;
       if (t.value == "Self")  return PathInType::Self;
       if (t.value == "crate") return PathInType::CRATE;
+    }
+    if (t.type == TokenType::IDENTIFIER) {
+      if (t.value == "self") return PathInType::self;
     }
     if (t.type == TokenType::STRICT_KEYWORD && t.value == "$crate") return PathInType::$CRATE;
     throw std::runtime_error("Invalid PathExprSegment: " + t.value);
@@ -3129,6 +3230,9 @@ class StructExpressionParselet : public PrefixParselet {
             break;
           }
           continue;
+        } else {
+          std::cerr << "missing ',' in structexpression" << std::endl;
+          throw std::runtime_error("missing ',' in struct expression");
         }
       }
 
@@ -3261,6 +3365,9 @@ class PathOrStructExpressionParselet : public PrefixParselet {
             break;
           }
           continue;
+        } else {
+          std::cerr << "missing ',' in structexpression" << std::endl;
+          throw std::runtime_error("missing ',' in struct expression");
         }
       }
 
@@ -3478,10 +3585,15 @@ class PredicateLoopExpressionParselet : public PrefixParselet {
 
 std::unique_ptr<ExpressionNode> parse_if(parser& p, const Token& token) {
   std::cout << "parsing if expression" << std::endl;
+  if (p.peek()->value != "(") {
+    std::cerr << "expected ( at the beginning of conditions in if expression" << std::endl;
+    throw std::runtime_error("expected ( at the beginning of conditions in if expression");
+  }
   auto cond = std::make_unique<Conditions>(p.parseExpression(0));
   auto thenBlock = p.parseBlockExpression();
   std::unique_ptr<BlockExpressionNode> elseBlock = nullptr;
-  ExpressionNode* elseIf = nullptr;
+  std::unique_ptr<ExpressionNode> elseIf = nullptr;
+
   auto next = p.peek();
   if (next && next->type == TokenType::STRICT_KEYWORD && next->value == "else") {
     std::cout << "parsing else in ifexpression" << std::endl;
@@ -3490,7 +3602,7 @@ std::unique_ptr<ExpressionNode> parse_if(parser& p, const Token& token) {
     if (afterElse && afterElse->type == TokenType::STRICT_KEYWORD && afterElse->value == "if") {
       std::cout << "having else if" << std::endl;
       auto elseIfExpr = p.get();
-      elseIf = parse_if(p, elseIfExpr.value()).get();
+      elseIf = std::move(parse_if(p, elseIfExpr.value()));
     } else {
       elseBlock = p.parseBlockExpression();
     }
@@ -3500,7 +3612,7 @@ std::unique_ptr<ExpressionNode> parse_if(parser& p, const Token& token) {
     std::move(cond),
     std::move(thenBlock),
     std::move(elseBlock),
-    elseIf, 
+    std::move(elseIf),
     token.line,
     token.column
   );
@@ -3510,11 +3622,15 @@ class IfExpressionParselet : public PrefixParselet {
  public:
   std::unique_ptr<ExpressionNode> parse(parser& p, const Token& token) override {
     std::cout << "parsing if expression" << std::endl;
+    if (p.peek()->value != "(") {
+      std::cerr << "expected ( at the beginning of conditions in if expression" << std::endl;
+      throw std::runtime_error("expected ( at the beginning of conditions in if expression");
+    }
     auto cond = std::make_unique<Conditions>(p.parseExpression(0));
     auto thenBlock = p.parseBlockExpression();
 
     std::unique_ptr<BlockExpressionNode> elseBlock = nullptr;
-    ExpressionNode* elseIf = nullptr;
+    std::unique_ptr<ExpressionNode> elseIf = nullptr;
 
     auto next = p.peek();
     if (next && next->type == TokenType::STRICT_KEYWORD && next->value == "else") {
@@ -3524,7 +3640,7 @@ class IfExpressionParselet : public PrefixParselet {
       if (afterElse && afterElse->type == TokenType::STRICT_KEYWORD && afterElse->value == "if") {
         std::cout << "having else if" << std::endl;
         auto elseIfExpr = p.get();
-        elseIf = parse_if(p, elseIfExpr.value()).get();
+        elseIf = std::move(parse_if(p, elseIfExpr.value()));
       } else {
         elseBlock = p.parseBlockExpression();
       }
@@ -3536,7 +3652,7 @@ class IfExpressionParselet : public PrefixParselet {
       std::move(cond),
       std::move(thenBlock),
       std::move(elseBlock),
-      elseIf,
+      std::move(elseIf),
       token.line,
       token.column
     );
@@ -3867,17 +3983,22 @@ class CallExpressionParselet : public InfixParselet {
     auto t = p.peek();
     if (!t.has_value()) throw std::runtime_error("Unexpected end of input in call expression");
 
-    if (!(t->type == TokenType::PUNCTUATION && t->value == ")")) {
+    if (t->value != ")") {
       while (true) {
         args.push_back(p.parseExpression(0));
 
         auto next = p.peek();
         if (!next.has_value()) throw std::runtime_error("Unexpected end of input in argument list");
 
-        if (next->type == TokenType::PUNCTUATION && next->value == ",") {
+        if (next->value == ",") {
           p.get();
+          next = p.peek();
+          if (next->value == ")") break;
           continue;
-        } else break;
+        }
+        if (next->value == ")") {
+          break;
+        }
       }
     }
 
@@ -4068,14 +4189,17 @@ Parser
     prefixParselets[{PUNCTUATION, "("}] = std::make_shared<ParenExpressionParselet>();
     prefixParselets[{PUNCTUATION, "["}] = std::make_shared<ArrayExpressionParselet>();
     prefixParselets[{PUNCTUATION, "::"}] = std::make_shared<PathExpressionParselet>();
+    prefixParselets[{PUNCTUATION, "{"}] = std::make_shared<BlockExpressionParselet>();
     prefixParselets[{IDENTIFIER, ""}] = std::make_shared<PathOrStructExpressionParselet>();
     prefixParselets[{PUNCTUATION, "<"}] = std::make_shared<PathExpressionParselet>();
+    prefixParselets[{STRICT_KEYWORD, "Self"}] = std::make_shared<PathExpressionParselet>();
     prefixParselets[{STRICT_KEYWORD, "loop"}] = std::make_shared<InfiniteLoopExpressionParselet>();
     prefixParselets[{STRICT_KEYWORD, "while"}] = std::make_shared<PredicateLoopExpressionParselet>();
     prefixParselets[{STRICT_KEYWORD, "if"}] = std::make_shared<IfExpressionParselet>();
     prefixParselets[{STRICT_KEYWORD, "match"}] = std::make_shared<MatchExpressionParselet>();
     prefixParselets[{STRICT_KEYWORD, "return"}] = std::make_shared<ReturnExpressionParselet>();
     prefixParselets[{STRICT_KEYWORD, "break"}] = std::make_shared<BreakExpressionParselet>();
+    prefixParselets[{STRICT_KEYWORD, "continue"}] = std::make_shared<ContinueExpressionParselet>();
     prefixParselets[{PUNCTUATION, "_"}] = std::make_shared<UnderscoreExpressionParselet>();
     prefixParselets[{STRICT_KEYWORD, "true"}] = std::make_shared<LiteralParselet>();
     prefixParselets[{STRICT_KEYWORD, "false"}] = std::make_shared<LiteralParselet>();
@@ -4442,18 +4566,72 @@ Parser
 
     // ReferencePattern → (& | &&) mut? PatternWithoutRange
     if (t->type == TokenType::PUNCTUATION && (t->value == "&" || t->value == "&&")) {
+      std::cout << "parsing reference type in parsePatternwithoutRange" << std::endl;
       get();
       int and_count = 1;
-      auto next = peek();
       and_count = 1 ? (t->value == "&") : 2;
       bool if_mut = false;
       auto maybe_mut = peek();
-      if (maybe_mut && maybe_mut->type == TokenType::RESERVED_KEYWORD && maybe_mut->value == "mut") {
+      if (maybe_mut && maybe_mut->value == "mut") {
         get();
+        std::cout << "getting mut in reference pattern" << std::endl;
         if_mut = true;
       }
       auto pwr = parsePatternWithoutRange();
       return std::make_unique<PatternWithoutRange>(std::make_unique<ReferencePattern>(and_count, if_mut, std::move(pwr)));
+    }
+
+    //mut+idpattern
+    if (t->value == "mut") {
+      std::cout << "getting mutable pattern" << std::endl;
+      get();
+      t = peek();
+      bool if_ref = false;
+      bool if_mut = true;
+    
+      if (!t || t->type != TokenType::IDENTIFIER) throw std::runtime_error("Expected identifier in IdentifierPattern");
+    
+      auto id_tok = get();
+      std::cout << "id_tok in parsing pattern no top alt: " << id_tok->value << std::endl;
+      Identifier id(id_tok.value().value);
+    
+      std::unique_ptr<PatternNoTopAlt> sub_pattern = nullptr;
+      auto next = peek();
+      if (next && next->type == TokenType::PUNCTUATION && next->value == "@") {
+        get();
+        sub_pattern = ParsePatternNoTopAlt();
+      }
+      std::cout << "get identifier pattern" << std::endl;
+      return std::make_unique<PatternWithoutRange>(
+        std::make_unique<IdentifierPattern>(if_ref, if_mut, std::move(id), std::move(sub_pattern))
+      );
+    }
+
+    //ref+mut+idpattern
+    if (t->value == "ref") {
+      get();
+      t = peek();
+      bool if_ref = true;
+      bool if_mut = false;
+    
+      if (t->value == "mut") if_mut = true;
+      t = peek();
+      if (!t || t->type != TokenType::IDENTIFIER) throw std::runtime_error("Expected identifier in IdentifierPattern");
+    
+      auto id_tok = get();
+      std::cout << "id_tok in parsing pattern no top alt: " << id_tok->value << std::endl;
+      Identifier id(id_tok.value().value);
+    
+      std::unique_ptr<PatternNoTopAlt> sub_pattern = nullptr;
+      auto next = peek();
+      if (next && next->type == TokenType::PUNCTUATION && next->value == "@") {
+        get();
+        sub_pattern = ParsePatternNoTopAlt();
+      }
+      std::cout << "get identifier pattern" << std::endl;
+      return std::make_unique<PatternWithoutRange>(
+        std::make_unique<IdentifierPattern>(if_ref, if_mut, std::move(id), std::move(sub_pattern))
+      );
     }
 
     // StructPattern / TupleStructPattern / GroupedPattern / TuplePattern
@@ -4583,6 +4761,7 @@ Parser
       if (!t || t->type != TokenType::IDENTIFIER) throw std::runtime_error("Expected identifier in IdentifierPattern");
     
       auto id_tok = get();
+      std::cout << "id_tok in parsing pattern no top alt: " << id_tok->value << std::endl;
       Identifier id(id_tok.value().value);
     
       std::unique_ptr<PatternNoTopAlt> sub_pattern = nullptr;
@@ -4720,6 +4899,7 @@ Parser
     auto next = peek();
     if (next && next->value == "mut") {
       get();
+      std::cout << "getting mut in reference type" << std::endl;
       is_mut = true;
     }
 
@@ -4770,6 +4950,7 @@ Parser
     if (tok->value == "&") return ParseReferenceType();
 
     auto typePath = ParseTypePath();
+    std::cout << "getting type path : " << typePath->toString() << std::endl;
     return std::make_unique<TypePathNode>(std::move(typePath), line, column);
   }
 
@@ -4898,7 +5079,13 @@ Parser
 
     if (tok->type == TokenType::STRICT_KEYWORD) {
       if (tok->value == "fn") {
-        return ParseFunctionItem();
+        std::cout << "parsing function" << std::endl;
+        try {
+          return ParseFunctionItem();
+        } catch (const std::exception& e) {
+          std::cerr << "Error while parsing function: " << e.what() << std::endl;
+          throw;
+        }
       } else if (tok->value == "struct") {
         auto v = ParseStructItem();
         std::unique_ptr<ItemNode> node;
@@ -4907,6 +5094,7 @@ Parser
         } else if (auto* p = std::get_if<std::unique_ptr<StructStructNode>>(&v)) {
           node = std::move(*p);
         }
+        std::cout << "getting struct" << std::endl;
         return node;
       } else if (tok->value == "enum") {
         return ParseEnumItem();
@@ -5010,7 +5198,7 @@ Parser
     if (!tok || tok->value != "(") { throw std::runtime_error("Expected '(' at start of function parameter list"); }
 
     std::unique_ptr<SelfParam> self_param = nullptr;
-    std::vector<FunctionParam> params;
+    std::vector<std::unique_ptr<FunctionParam>> params;
 
     tok = peek();
     if (tok && tok->value == ")") {
@@ -5072,15 +5260,15 @@ Parser
         tok = peek();
         if (tok && tok->value == "...") {
           get();
-          params.emplace_back(std::make_unique<ellipsis>());
+          params.emplace_back(std::make_unique<FunctionParam>(std::make_unique<ellipsis>()));
         } else {
           auto type = ParseType();
           auto fpp = std::make_unique<FunctionParamPattern>(std::move(pattern), std::move(type));
-          params.emplace_back(std::move(fpp));
+          params.emplace_back(std::make_unique<FunctionParam>(std::move(fpp)));
         }
       } else {
         auto type = ParseType();
-        params.emplace_back(std::move(type));
+        params.emplace_back(std::make_unique<FunctionParam>(std::move(type)));
       }
 
       tok = peek();
@@ -5141,7 +5329,12 @@ Parser
 
     if (next && next->value == "{") {
       std::cout << "parse block expression in function item" << std::endl;
-      func->block_expression = std::move(parseBlockExpression());
+      try {
+        func->block_expression = std::move(parseBlockExpression());
+      } catch (const std::exception& e) {
+        std::cerr << "[Parse BlockExpression Error]: " << e.what() << std::endl;
+        throw std::runtime_error("error in parsing block expression");
+      }
     } else if (next && next->value == ";") {
       std::cout << "finish parsing unimplemented function" << std::endl;
       get();
@@ -5227,6 +5420,7 @@ Parser
           throw std::runtime_error("Expected ':' in struct field");
         }
         auto typeNode = ParseType();
+        std::cout << "getting type : " << typeNode->toString() << std::endl;
         fields.push_back(std::make_unique<StructField>(id->value, std::move(typeNode)));
 
         auto sep = peek();
@@ -5235,6 +5429,7 @@ Parser
       node->struct_fields = std::make_unique<StructFieldNode>(std::move(fields), next->line, next->column);
       return node;
     }
+    std::cout << "parsing structstruct error" << std::endl;
     throw std::runtime_error("Expected '{' or ';' in struct declaration");
   }
 
@@ -5292,6 +5487,7 @@ Parser
       std::cout << "parsing struct struct" << std::endl;
       return ParseStructStruct(id);
     } else {
+      std::cout << "invalid token after struct name" << std::endl;
       throw std::runtime_error("Expected '{', '(' or ';' after struct name");
     }
   }
@@ -5660,7 +5856,10 @@ Parser
            dynamic_cast<const RangeExpressionNode*>(expr) ||
            dynamic_cast<const ReturnExpressionNode*>(expr) ||
            dynamic_cast<const UnderscoreExpressionNode*>(expr) || 
-           dynamic_cast<const LazyBooleanExpressionNode*>(expr);
+           dynamic_cast<const LazyBooleanExpressionNode*>(expr) ||
+           dynamic_cast<const StructExpressionNode*>(expr) || 
+           dynamic_cast<const ArithmeticOrLogicalExpressionNode*>(expr) ||
+           dynamic_cast<const TypeCastExpressionNode*>(expr);
   }
 
   std::unique_ptr<ExpressionStatement> parser::parseExpressionStatement() {
@@ -5969,6 +6168,11 @@ std::unique_ptr<TypePathFn> parser::ParseTypePathFn() {
       prefixIt = prefixParselets.find({t.type, ""});
     }
 
+    if (prefixIt == prefixParselets.end()) {
+      std::cerr << "no parselet for prefix : " << t.value << std::endl;
+      throw std::runtime_error("no corrensponding prefixparselet");
+    }
+
     auto left = prefixIt->second->parse(*this, t);
 
     while (true) {
@@ -6094,6 +6298,18 @@ std::unique_ptr<TypePathFn> parser::ParseTypePathFn() {
       left.release();
       return std::make_unique<ExpressionWithoutBlockNode>(std::unique_ptr<LazyBooleanExpressionNode>(p), line, column);
     }
+    if (auto* p = dynamic_cast<ArithmeticOrLogicalExpressionNode*>(raw)) {
+      left.release();
+      return std::make_unique<ExpressionWithoutBlockNode>(std::unique_ptr<ArithmeticOrLogicalExpressionNode>(p), line, column);
+    }
+    if (auto* p = dynamic_cast<BreakExpressionNode*>(raw)) {
+      left.release();
+      return std::make_unique<ExpressionWithoutBlockNode>(std::unique_ptr<BreakExpressionNode>(p), line, column);
+    }
+    if (auto* p = dynamic_cast<TypeCastExpressionNode*>(raw)) {
+      left.release();
+      return std::make_unique<ExpressionWithoutBlockNode>(std::unique_ptr<TypeCastExpressionNode>(p), line, column);
+    }
 
     throw std::runtime_error("Internal error: parsed expression type not supported by ExpressionWithoutBlockNode");
   };
@@ -6119,11 +6335,15 @@ std::unique_ptr<TypePathFn> parser::ParseTypePathFn() {
 
         auto pos_before_parsing = get_pos();
 
+        bool if1 = true;
+        bool if2 = true;
+
         //try parsing statement
         try {
           std::cout << "ParseStatement in BlockExpression" << std::endl;
           auto stmt = ParseStatement();
           if (stmt) {
+            std::cout << "inserting statement to blockexpression. Current num : " << statements.size() << std::endl;
             statements.push_back(std::move(stmt));
             continue;
           }
@@ -6133,6 +6353,7 @@ std::unique_ptr<TypePathFn> parser::ParseTypePathFn() {
                     << ": " << e.what() << std::endl;
           std::cout << "roll back after failing parsing statement" << std::endl;
           roll_back(pos_before_parsing);
+          if1 = false;
         }
 
         //try parsing expression wothout block
@@ -6140,6 +6361,9 @@ std::unique_ptr<TypePathFn> parser::ParseTypePathFn() {
           expr = parseExpressionWithoutBlock();
           if (!expr) {
             throw std::runtime_error("expression parsing failed");
+          } else {
+            std::cout << "getting expression without block, block expression parsing finished" << std::endl;
+            break;
           }
         } catch (const std::exception& e) {
           std::cerr << "parseExpressionWithoutBlock failed at line "
@@ -6147,16 +6371,22 @@ std::unique_ptr<TypePathFn> parser::ParseTypePathFn() {
                     << ": " << e.what() << std::endl;
           std::cout << "roll back after failing parsing expression" << std::endl;
           roll_back(pos_before_parsing);
+          if2 = false;
+        }
+
+        if (!if1 && !if2) {
+          std::cerr << "error in parsing block expression: unknown thing" << std::endl;
+          throw std::runtime_error("unable to parse something in blockexpression");
         }
       }
     } catch (const std::exception& e) {
       std::cerr << "[ParseBlockExpressionError] : " << e.what() << std::endl;
+      throw std::runtime_error("error in parsing block expression");
     }
     auto close = get();
     if (!close.has_value() || close->value != "}") {
       throw std::runtime_error("Expected '}' to close block");
     }
-
     std::cout << "finish parsing blockexpression" << std::endl;
     std::cout << "next token: " << peek()->value << std::endl;
     return std::make_unique<BlockExpressionNode>(
@@ -6198,6 +6428,10 @@ std::unique_ptr<TypePathFn> parser::ParseTypePathFn() {
       catch (const std::exception& e) { 
         std::cerr << "Caught exception: " << e.what() << std::endl;
         node = nullptr; 
+      }
+
+      if (tok->value == "struct" || tok->value == "fn" || tok->value == "impl" || tok->value == "enum" || tok->value == "const") {
+        if (!node) throw std::runtime_error("error in parsing item");
       }
 
       if (!node) {

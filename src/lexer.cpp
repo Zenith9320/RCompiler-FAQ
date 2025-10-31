@@ -50,15 +50,15 @@ std::unordered_set<std::string> keywords = {
 std::vector<TokenRule> type_rules = {
   TokenRule(TokenType::STRICT_KEYWORD, strict_keyword_regex),
   TokenRule(TokenType::RESERVED_KEYWORD, reserved_keyword_regex),
+  TokenRule(TokenType::RAW_BYTE_STRING_LITERAL, raw_byte_string_regex),
+  TokenRule(TokenType::RAW_C_STRING_LITERAL, raw_c_str_regex),
+  TokenRule(TokenType::RAW_STRING_LITERAL, raw_string_regex),
   TokenRule(TokenType::IDENTIFIER, identifier_regex),
   TokenRule(TokenType::CHAR_LITERAL, char_literal_regex),
   TokenRule(TokenType::STRING_LITERAL, string_literal_regex),
-  TokenRule(TokenType::RAW_STRING_LITERAL, raw_string_regex),
   TokenRule(TokenType::BYTE_LITERAL, byte_literal_regex),
   TokenRule(TokenType::BYTE_STRING_LITERAL, byte_string_regex),
-  TokenRule(TokenType::RAW_BYTE_STRING_LITERAL, raw_byte_string_regex),
   TokenRule(TokenType::C_STRING_LITERAL, c_str_regex),
-  TokenRule(TokenType::RAW_C_STRING_LITERAL, raw_c_str_regex),
   TokenRule(TokenType::FLOAT_LITERAL, float_literal_regex),
   TokenRule(TokenType::INTEGER_LITERAL, int_literal_regex),
   TokenRule(TokenType::PUNCTUATION, punctuation_regex),
@@ -74,7 +74,9 @@ void lexer::skip_comment() {
   while (pos + 1 < length) {
     if (input[pos] == '/' && input[pos + 1] == '/') {
       pos += 2;
-      while (pos < length && input[pos] != '\n') pos++;
+      while (pos < length && input[pos] != '\n') {
+        pos++;
+      } 
       if (pos < length && input[pos] == '\n') {
         pos++;
         while (input[pos] == ' ') pos++;
@@ -82,8 +84,8 @@ void lexer::skip_comment() {
         column = 1;
       }
       while (input[pos] == '\n' || input[pos] == '\t' || input[pos] == ' ') {
-        pos++;
         if (input[pos] == '\n') line++;
+        pos++;
       }
       continue;
     } else if (input[pos] == '/' && input[pos + 1] == '*') {
@@ -95,6 +97,9 @@ void lexer::skip_comment() {
           closed = true;
           break;
         }
+        pos++;
+      }
+      while (input[pos] == '\n' || input[pos] == '\t' || input[pos] == ' ') {
         if (input[pos] == '\n') {
           line++;
           column = 1;
@@ -103,7 +108,6 @@ void lexer::skip_comment() {
         }
         pos++;
       }
-
       if (!closed) {
         std::cerr << "Warning: unterminated block comment at line "
                   << line << ", column " << column << std::endl;

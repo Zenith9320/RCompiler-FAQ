@@ -8,6 +8,31 @@ bool isSameDerived(const std::unique_ptr<T>& lhs, const std::unique_ptr<U>& rhs)
   return typeid(*lhs) == typeid(*rhs);
 }
 
+bool isOverflow(const std::string num) {
+  const std::string MAX_INT_STR = "2147483647";
+
+  if (num.size() > MAX_INT_STR.size()) return true;
+
+  if (num.size() < MAX_INT_STR.size()) return false;
+
+  return num > MAX_INT_STR;
+}
+
+std::string getFunctionParamTypeString(const FunctionParam* param) {
+  return std::visit([](auto&& arg) -> std::string {
+    using T = std::decay_t<decltype(arg)>;
+    if constexpr (std::is_same_v<T, std::unique_ptr<TypeNode>>) {
+      return arg ? arg->toString() : "<null type>";
+    } else if constexpr (std::is_same_v<T, std::unique_ptr<FunctionParamPattern>>) {
+      return (arg && arg->type) ? arg->type->toString() : "<null type>";
+    } else if constexpr (std::is_same_v<T, std::unique_ptr<ellipsis>>) {
+      return arg ? arg->ellip : "<ellipsis>";
+    } else {
+      return "<unknown>";
+    }
+  }, param->info);
+}
+
 struct FieldInfo {
   std::string name;
   TypeNode* type;
@@ -61,6 +86,7 @@ struct struct_item {
 struct SymbolTable {
   std::unordered_set<std::string> structs;
   std::unordered_map<std::string, FunctionParameter*> functions;
+  std::unordered_map<std::string, TypeNode*> function_types;
   std::unordered_set<std::string> constants;
   std::map<struct_item, std::string> struct_items; //从identifier到type的map
 
@@ -109,6 +135,7 @@ class Scope {
   Scope* parent; // 父作用域
   std::string possible_self = "";
   int id = 0;
+  bool if_cycle = false;//判断是不是在循环体内
 
   Scope(Scope* parent_scope) : parent(parent_scope) {
     if (parent_scope) id = parent_scope->id + 1;
@@ -126,7 +153,7 @@ class Scope {
 
   void insertFunc(std::string name, FunctionSymbol func) {
     if (func_table.count(name)) {
-      throw std::runtime_error("Duplicate function declaration: " + name);
+      if (name != "getInt") throw std::runtime_error("Duplicate function declaration: " + name);
     }
     func_table[name] = func;
   }
@@ -134,6 +161,9 @@ class Scope {
   FunctionSymbol* lookupFunc(const std::string& name) {
     if (func_table.count(name)) {
       return &func_table[name];
+    }
+    if (declared_struct_functions.count(name)) {
+      return &declared_struct_functions[name];
     }
     if (parent) {
       return parent->lookupFunc(name);
@@ -150,6 +180,17 @@ class Scope {
     }
     return nullptr;
   }
+
+  
+  TypeNode* get_function_type(const std::string& name) {
+    if (symbol_table.function_types.count(name)) {
+      return symbol_table.function_types[name];
+    } else if (parent) {
+      return parent->get_function_type(name);
+    }
+    return nullptr;
+  }
+
 
   void insertType(std::string name, TypeSymbol type) {
     if (type_table.count(name)) {
@@ -202,6 +243,28 @@ class Scope {
   }
 };
 
+bool is_type_equal(const TypeNode* type1, const TypeNode* type2) {
+  std::string s1 = type1->toString();
+  std::string s2 = type2->toString();
+  std::size_t pos = s1.rfind("::");
+  if (pos != std::string::npos) {
+    s1 = s1.substr(0, pos);
+  }
+  pos = s2.rfind("::");
+  if (pos != std::string::npos) {
+    s2 = s2.substr(0, pos);
+  }
+  if (auto* ref = dynamic_cast<const ReferenceTypeNode*>(type1)) {
+    while (!s1.empty() && s1.front() == '&') s1.erase(s1.begin());
+    if (ref->if_mut && s1.rfind("mut", 0) == 0) s1.erase(0, 3);
+  }
+  if (auto* ref = dynamic_cast<const ReferenceTypeNode*>(type2)) {
+    while (!s2.empty() && s2.front() == '&') s2.erase(s2.begin());
+    if (ref->if_mut && s2.rfind("mut", 0) == 0) s2.erase(0, 3);
+  }
+  return s1 == s2;
+}
+
 class semantic_checker {
  private:
   std::vector<std::unique_ptr<ASTNode>> ast;
@@ -217,6 +280,8 @@ class semantic_checker {
   void enterScope() {
     Scope* newScope = new Scope(currentScope);
     currentScope = newScope;
+    currentScope->possible_self = currentScope->parent->possible_self;
+    currentScope->if_cycle = currentScope->parent->if_cycle;
     std::cout << "enter Scope : " << currentScope->id << std::endl;
   }
 
@@ -269,6 +334,14 @@ class semantic_checker {
     std::string type2 = getExpressionType(expr->expression2.get())->toString();
     std::cout << "type of expression1 in comparison expression : " << type1 << std::endl;
     std::cout << "type of expression2 in comparison expression : " << type2 << std::endl;
+    size_t pos = type1.rfind("::");
+    if (pos != std::string::npos) {
+      type1 = type1.substr(0, pos);
+    }
+    pos = type2.rfind("::");
+    if (pos != std::string::npos) {
+      type2 = type2.substr(0, pos);
+    }
     if (type1 == type2 || type1 == "usize" && type2 == "i32") return true;
     return false;
   }
@@ -299,27 +372,49 @@ class semantic_checker {
     }
 
     for (size_t i = 0; i < params->function_params.size(); ++i) {
-      const FunctionParam& fp = params->function_params[i];
+      const FunctionParam* fp = params->function_params[i].get();
       std::string paramName;
       TypeNode* typeNode = nullptr;
       bool if_mut = false;
 
-      if (std::holds_alternative<std::unique_ptr<FunctionParamPattern>>(fp.info)) {
-        auto& pattern = std::get<std::unique_ptr<FunctionParamPattern>>(fp.info);
+      if (std::holds_alternative<std::unique_ptr<FunctionParamPattern>>(fp->info)) {
+        auto& pattern = std::get<std::unique_ptr<FunctionParamPattern>>(fp->info);
         paramName = pattern->pattern->toString();
         typeNode = pattern->type.get();
         if (auto *ref = dynamic_cast<ReferenceTypeNode*>(typeNode)) {
-          if_mut = ref->if_mut;
+          if_mut = ref->if_mut || if_mut;
         }
+        auto if_mut_pattern = std::visit([](auto const& ptr) -> bool {
+          if (!ptr) return true;
+
+          using T = std::decay_t<decltype(ptr)>;
+          if constexpr (std::is_same_v<T, std::unique_ptr<PatternWithoutRange>>) {
+            return std::visit([](auto const& innerPtr) -> bool {
+              if (!innerPtr) return true;
+              using InnerT = std::decay_t<decltype(innerPtr)>;
+              if constexpr (std::is_same_v<InnerT, std::unique_ptr<IdentifierPattern>>) {
+                return innerPtr->if_mut;
+              } else if constexpr (std::is_same_v<InnerT, std::unique_ptr<ReferencePattern>>) {
+                std::cout << "getting reference pattern in letstatement" << std::endl;
+                return innerPtr->if_mut;
+              } else {
+                return true;
+              }
+            }, ptr->pattern);
+          } else {
+            return true;
+          }
+        }, pattern->pattern->pattern);
+        if_mut = if_mut || if_mut_pattern;
         std::cout << "declaring: " << paramName << " whose if_mut is " << if_mut << " and whose type is : " << typeNode->toString() << std::endl;
-      } else if (std::holds_alternative<std::unique_ptr<TypeNode>>(fp.info)) {
+      } else if (std::holds_alternative<std::unique_ptr<TypeNode>>(fp->info)) {
         paramName = "_param" + std::to_string(i);
-        typeNode = std::get<std::unique_ptr<TypeNode>>(fp.info).get();
+        typeNode = std::get<std::unique_ptr<TypeNode>>(fp->info).get();
         if (auto *ref = dynamic_cast<ReferenceTypeNode*>(typeNode)) {
           if_mut = ref->if_mut;
         }
         std::cout << "declaring: " << paramName << " whose if_mut is " << if_mut << std::endl;
-      } else if (std::holds_alternative<std::unique_ptr<ellipsis>>(fp.info)) {
+      } else if (std::holds_alternative<std::unique_ptr<ellipsis>>(fp->info)) {
         std::cerr << "Variadic ... parameters not supported" << std::endl;
         continue;
       } else {
@@ -364,13 +459,20 @@ class semantic_checker {
     currentScope->declared_struct[structNode->identifier] = std::move(structInfo);
   }
 
+  
+
   std::string get_return_type_in_expression(ExpressionNode* expr) {
     std::cout << "get return type in expression" << std::endl;
     if (auto* return_expr = dynamic_cast<ReturnExpressionNode*>(expr)) {
       std::cout << "try to get return type in returnexpression" << std::endl;
       return getExpressionType(return_expr->expression.get())->toString();
+    } else if (auto* break_expr = dynamic_cast<BreakExpressionNode*>(expr)) {
+      std::cout << "try to get return type in breakexpression" << std::endl;
+      if (!break_expr->expr) return "";
+      return getExpressionType(break_expr->expr.get())->toString();
     } else if (auto* if_expr = dynamic_cast<IfExpressionNode*>(expr)) {
       std::cout << "try to get return type in ifexpression" << std::endl;
+      if (!if_expr->else_block) return "";
       std::string type = get_return_type(if_expr->block_expression.get());
       if (type != "") {
         return type;
@@ -387,6 +489,8 @@ class semantic_checker {
       return "bool";
     } else if (auto* expr_node = dynamic_cast<LazyBooleanExpressionNode*>(expr)) {
       return "bool";
+    } else if (auto* expr_node = dynamic_cast<InfiniteLoopExpressionNode*>(expr)) {
+      return get_return_type(expr_node->block_expression.get());;
     }
     return "";
   }
@@ -405,6 +509,35 @@ class semantic_checker {
     }
   } 
 
+  std::unordered_set<std::string> get_return_type_in_if(IfExpressionNode* if_expr) {
+    std::unordered_set<std::string> types;
+    if (if_expr->block_expression) {
+      std::string type1 = get_return_type_without_changing_scope(if_expr->block_expression.get());
+      if (type1 == "usize") type1 = "i32";
+      types.insert(type1);
+    } 
+    if (if_expr->else_block) {
+      std::string type1 = get_return_type_without_changing_scope(if_expr->else_block.get());
+      if (type1 == "usize") type1 = "i32";
+      types.insert(type1);
+    }
+    if (if_expr->else_if) {
+      if (auto* if_branch = dynamic_cast<IfExpressionNode*>(if_expr->else_if.get())) {
+        auto branch_types = get_return_type_in_if(if_branch);
+        for (auto it = branch_types.begin(); it != branch_types.end(); it++) {
+          types.insert(*it);
+        }
+      }
+    }
+    for (auto it = types.begin(); it != types.end(); it++) {
+      std::cout << "return type in if expression: " << *it << std::endl;
+    } 
+    if (types.size() != 1) {
+      std::cout << "return type mismatch in if expression" << std::endl;
+    }
+    return types;
+  }
+
   bool check_return_type(BlockExpressionNode* block) {
     std::cout << "enter scope in checking return type in block expression" << std::endl;
     enterScope();
@@ -416,6 +549,13 @@ class semantic_checker {
       if (temp != "") {
         types.insert(temp);
       }
+      if (block->statement[i]->expr_statement) {
+        if (auto* if_expr = dynamic_cast<IfExpressionNode*>(block->statement[i]->expr_statement->expression.get())) {
+          if (get_return_type_in_if(if_expr).size() != 1){
+            return false;
+          }
+        }
+      }
     }
     if (auto* expr_node = dynamic_cast<ExpressionWithoutBlockNode*>(block->expression_without_block.get())) {
       std::string s = std::visit([this](auto& node_ptr) -> std::string {
@@ -424,6 +564,8 @@ class semantic_checker {
           if (node_ptr && node_ptr->expression && getExpressionType(node_ptr->expression.get())) return getExpressionType(node_ptr->expression.get())->toString();
           return "";
         } else if constexpr (std::is_same_v<T, std::unique_ptr<ArrayExpressionNode>>) {
+          return getExpressionType(node_ptr.get())->toString();
+        } else if constexpr (std::is_same_v<T, std::unique_ptr<BreakExpressionNode>>) {
           return getExpressionType(node_ptr.get())->toString();
         } else if constexpr (std::is_same_v<T, std::unique_ptr<IfExpressionNode>>) {
           if (node_ptr) {
@@ -441,6 +583,8 @@ class semantic_checker {
           return "";
         } else if constexpr (std::is_same_v<T, std::unique_ptr<LazyBooleanExpressionNode>>) {
           return "bool";
+        } else if constexpr (std::is_same_v<T, std::unique_ptr<TypeCastExpressionNode>>) {
+          return node_ptr->type->toString();
         } else if constexpr (std::is_same_v<T, std::unique_ptr<LiteralExpressionNode>>) {
           if (node_ptr) {
             if (std::holds_alternative<std::unique_ptr<integer_literal>>(node_ptr->literal)) {
@@ -524,7 +668,21 @@ class semantic_checker {
       std::cout << "checking the " << i << "th statment in blockExpressionNode" << std::endl;
       std::string temp = get_return_type_in_statement(block->statement[i].get());
       if (temp != "") {
-        types.insert(temp);
+        std::cout << "origin type : " << temp << std::endl;
+        std::string actual_temp = temp;
+        size_t pos = temp.rfind("::");
+        if (pos != std::string::npos) {
+          actual_temp = temp.substr(0, pos);
+        }
+        std::cout << "getting return type in statement : " << actual_temp << std::endl;
+        types.insert(actual_temp);
+      }
+      if (block->statement[i]->expr_statement) {
+        if (auto* if_expr = dynamic_cast<IfExpressionNode*>(block->statement[i]->expr_statement->expression.get())) {
+          if (get_return_type_in_if(if_expr).size() != 1){
+            return false;
+          }
+        }
       }
     }
     if (auto* expr_node = dynamic_cast<ExpressionWithoutBlockNode*>(block->expression_without_block.get())) {
@@ -535,6 +693,8 @@ class semantic_checker {
           if (node_ptr && node_ptr->expression && getExpressionType(node_ptr->expression.get())) return getExpressionType(node_ptr->expression.get())->toString();
           return "";
         } else if constexpr (std::is_same_v<T, std::unique_ptr<ArrayExpressionNode>>) {
+          return getExpressionType(node_ptr.get())->toString();
+        } else if constexpr (std::is_same_v<T, std::unique_ptr<BreakExpressionNode>>) {
           return getExpressionType(node_ptr.get())->toString();
         } else if constexpr (std::is_same_v<T, std::unique_ptr<LazyBooleanExpressionNode>>) {
           return "bool";
@@ -599,7 +759,9 @@ class semantic_checker {
           auto* expr1 = node_ptr->expression1.get();
           auto* type = getExpressionType(expr1);
           if (auto* path_type = dynamic_cast<TypePathNode*>(type)) {
+            std::cout << "getting typepathnode in logical expression : " << path_type->toString() << std::endl;
             std::string name = path_type->toString();
+            if (is_legal_type(name)) return name;
             auto* info = currentScope->lookupVar(name);
             return info->type->toString();
           } else {
@@ -607,6 +769,8 @@ class semantic_checker {
           }
         } else if constexpr (std::is_same_v<T, std::unique_ptr<LiteralExpressionNode>>) {
           return getExpressionType(node_ptr.get())->toString();
+        } else if constexpr (std::is_same_v<T, std::unique_ptr<TypeCastExpressionNode>>) {
+          return node_ptr->type->toString();
         } else if constexpr (std::is_same_v<T, std::unique_ptr<PathExpressionNode>>) {
           return getExpressionType(node_ptr.get())->toString();
         } else if constexpr (std::is_same_v<T, std::unique_ptr<GroupedExpressionNode>>) {
@@ -616,13 +780,20 @@ class semantic_checker {
           }
           return getExpressionType(node_ptr->expression.get())->toString();
         } else {
+          std::cout << "unknown type of expression without block" << std::endl;
           return "";
         }
       }, expr_node->expr);
       if (s == "") std::cout << "failed to get type in expressionwithoutblock" << std::endl;
       if (s != "") {
-        types.insert(s);
-        std::cout << "type in expression without block: " << s << std::endl;
+        std::cout << "origin type: " << s << std::endl;
+        std::string actual_temp = s;
+        size_t pos = s.rfind("::");
+        if (pos != std::string::npos) {
+          actual_temp = s.substr(0, pos);
+        }
+        types.insert(actual_temp);
+        std::cout << "type in expression without block: " << actual_temp << std::endl;
       }
     }
     if (types.size() != 1) {
@@ -657,6 +828,9 @@ class semantic_checker {
           return "";
         } else if constexpr (std::is_same_v<T, std::unique_ptr<ArrayExpressionNode>>) {
           return getExpressionType(node_ptr.get())->toString();
+        } else if constexpr (std::is_same_v<T, std::unique_ptr<StructExpressionNode>>) {
+          std::cout << "return type: got in struct expression" << std::endl;
+          return node_ptr->pathin_expression->toString();
         } else if constexpr (std::is_same_v<T, std::unique_ptr<IfExpressionNode>>) {
           if (node_ptr) {
             std::string t = get_return_type(node_ptr->then_block.get());
@@ -732,6 +906,8 @@ class semantic_checker {
           return getExpressionType(node_ptr.get())->toString();
         } else if constexpr (std::is_same_v<T, std::unique_ptr<PathExpressionNode>>) {
           return getExpressionType(node_ptr.get())->toString();
+        } else if constexpr (std::is_same_v<T, std::unique_ptr<TypeCastExpressionNode>>) {
+          return node_ptr->type->toString();
         } else {
           std::cout << "failed getting return type in get_return_type" << std::endl;
           return "";
@@ -743,7 +919,6 @@ class semantic_checker {
   }
 
   std::string get_return_type_without_changing_scope(BlockExpressionNode* block) {
-    std::cout << "enter scope in getting return type in block expression" << std::endl;
     std::cout << "getting return type in blockexpressionnode" << std::endl;
     for (int i = 0; i < block->statement.size(); i++) {
       std::cout << "checking the " << i << "th statment in blockExpressionNode" << std::endl;
@@ -760,6 +935,9 @@ class semantic_checker {
           return "";
         } else if constexpr (std::is_same_v<T, std::unique_ptr<ArrayExpressionNode>>) {
           return getExpressionType(node_ptr.get())->toString();
+        } else if constexpr (std::is_same_v<T, std::unique_ptr<StructExpressionNode>>) {
+          std::cout << "return type: got in struct expression" << std::endl;
+          return node_ptr->pathin_expression->toString();
         } else if constexpr (std::is_same_v<T, std::unique_ptr<IfExpressionNode>>) {
           if (node_ptr) {
             std::string t = get_return_type(node_ptr->then_block.get());
@@ -824,6 +1002,7 @@ class semantic_checker {
           auto* type = getExpressionType(expr1);
           if (auto* path_type = dynamic_cast<TypePathNode*>(type)) {
             std::string name = path_type->toString();
+            if (is_legal_type(name)) return name;
             auto* info = currentScope->lookupVar(name);
             return info->type->toString();
           } else {
@@ -835,6 +1014,8 @@ class semantic_checker {
           return getExpressionType(node_ptr.get())->toString();
         } else if constexpr (std::is_same_v<T, std::unique_ptr<GroupedExpressionNode>>) {
           return getExpressionType(node_ptr->expression.get())->toString();
+        } else if constexpr (std::is_same_v<T, std::unique_ptr<TypeCastExpressionNode>>) {
+          return node_ptr->type->toString();
         } else {
           std::cout << "failed getting return type in get_return_type_without_changing_scope" << std::endl;
           return "";
@@ -859,11 +1040,97 @@ class semantic_checker {
           || type == "bool" || type == "char" || type == "()");
   }
 
+  bool check_array_length_const(ArrayTypeNode* array) {//检查arrayType的长度是pathExpression的时候是不是const类型
+    if (auto* len = dynamic_cast<PathExpressionNode*>(array->expression.get())) {
+      std::string length = len->toString();
+      std::cout << "length of array : " << length << std::endl;
+      if (!currentScope->lookupConst(length)) return false;
+      if (auto* subArray = dynamic_cast<ArrayTypeNode*>(array->type.get())) {
+        if (!check_array_length_const(subArray)) return false;
+      }
+    }
+    return true;
+  }
+
+  bool has_exit_in_block(const BlockExpressionNode* block) {
+    for (int i = 0; i < block->statement.size(); i++) {
+      if (block->statement[i]->expr_statement != nullptr) {
+        if (auto* call = dynamic_cast<CallExpressionNode*>(block->statement[i]->expr_statement->expression.get())) {
+          if (auto* path = dynamic_cast<PathExpressionNode*>(call->expression.get())) {
+            if (path->toString() == "exit") return true;
+          }
+        }
+      }
+    }
+    if (!block->expression_without_block) return false;
+    if (std::holds_alternative<std::unique_ptr<CallExpressionNode>>(block->expression_without_block->expr)) {
+      auto& call = std::get<std::unique_ptr<CallExpressionNode>>(block->expression_without_block->expr);
+      if (auto* path = dynamic_cast<PathExpressionNode*>(call->expression.get())) {
+        if (path->toString() == "exit") return true;
+      }
+    }
+    return false;
+  }
+
+  bool has_sth_after_exit(const BlockExpressionNode* block) {
+    for (int i = 0; i < block->statement.size(); i++) {
+      if (block->statement[i]->expr_statement != nullptr) {
+        if (auto* call = dynamic_cast<CallExpressionNode*>(block->statement[i]->expr_statement->expression.get())) {
+          if (auto* path = dynamic_cast<PathExpressionNode*>(call->expression.get())) {
+            if (path->toString() == "exit") {
+              std::cout << "id of exit : " << i << "  " << "size of statement:" << block->statement.size() << std::endl;
+              if (i == block->statement.size() - 1 && !block->expression_without_block) return false;
+              else return true;
+            }
+          }
+        }
+      }
+    }
+    if (!block->expression_without_block) return false;
+    if (std::holds_alternative<std::unique_ptr<CallExpressionNode>>(block->expression_without_block->expr)) {
+      auto& call = std::get<std::unique_ptr<CallExpressionNode>>(block->expression_without_block->expr);
+      if (auto* path = dynamic_cast<PathExpressionNode*>(call->expression.get())) {
+        if (path->toString() == "exit") return false;
+      }
+    }
+    return false;
+  }
+
   //在impl中，function可能会有selfParam，需要记录self指向的是什么类型，同时需要记录这个类型的函数和成员来检查methodcall是否合法
   //function本身只需要记录可能存在的self是指向什么类，在Scope中存储这个类的相关信息
   bool check_Item(const ItemNode* expr) {
     //===Function===
     if (auto* function = dynamic_cast<const FunctionNode*>(expr)) {
+      //如果是main函数，先要检查有没有exit函数，并且要检查返回值要么没有要么是->()
+      if (function->identifier == "main") {
+        std::cout << "checking main_func" << std::endl;
+        if (!function->block_expression) return false;
+        if (!has_exit_in_block(function->block_expression.get())) {
+          std::cout << "missing exit in main function" << std::endl;
+          return false;
+        }
+        if (has_sth_after_exit(function->block_expression.get())) {
+          std::cerr << "nothing allowed after exit in main function" << std::endl;
+          return false;
+        }
+        if (function->return_type) {
+          std::cout << "checking if return_type is ->() in main function" << std::endl;
+          if (function->return_type->type->toString() == "()") {
+            return true;
+          } else {
+            std::cout << "invalid return type in main function: " << function->return_type->type->toString() << std::endl;
+            return false;
+          }
+        }
+      } else {
+        if (function->block_expression) {
+          if (has_exit_in_block(function->block_expression.get())) {
+            std::cerr << "function exit cannot be used in non_main function" << std::endl;
+            return false;
+          }
+        }
+      }
+      
       FunctionSymbol func_info;
       func_info.name = function->identifier;
       func_info.param_types = function->function_parameter.get();
@@ -872,10 +1139,21 @@ class semantic_checker {
 
       currentScope->insertFunc(function->identifier, func_info);
 
+      currentScope->symbol_table.functions[function->identifier] = function->function_parameter.get();
+      currentScope->symbol_table.function_types[function->identifier] = func_info.return_type;
+
       if (function->block_expression) {
         std::cout << "checking blockexpression of function in scope : " << currentScope->id << std::endl;
         enterScope();
         declareFunctionParameters(function->function_parameter.get(), currentScope, function->impl_type_name);
+        if (function->return_type) {
+          if (auto* array = dynamic_cast<ArrayTypeNode*>(function->return_type->type.get())) {
+            if (!check_array_length_const(array)) {
+              std::cout << "length of array is dynamic" << std::endl;
+              return false;
+            }
+          }
+        }
         bool ans = check_BlockExpression_without_changing_scope(dynamic_cast<BlockExpressionNode*>(function->block_expression.get()));
         exitScope();
         if (!ans) {
@@ -883,7 +1161,14 @@ class semantic_checker {
           return ans;
         }
       }
-
+      if (function->return_type) {
+        if (auto* paren = dynamic_cast<ParenthesizedTypeNode*>(function->return_type->type.get())) {
+          if (paren->type == nullptr) return true;
+        }
+        if (auto* tuple = dynamic_cast<TupleTypeNode*>(function->return_type->type.get())) {
+          if (tuple->types.size() == 0) return true;
+        }
+      }
       if (function->return_type && function->block_expression) {
         std::cout << "checking if return type mismatch in function : " << function->identifier << std::endl;
         std::string declared_return_type = function->return_type->type->toString();
@@ -916,7 +1201,6 @@ class semantic_checker {
           }
         }
       }
-      if (function->block_expression) exitScope();
       return true;
     }
     //===Trait===
@@ -959,6 +1243,7 @@ class semantic_checker {
       }
 
       currentScope->trait_table[Trait->identifier] = std::move(traitSym);
+      std::cout << "inserting trait : " << Trait->identifier << " in scope : " << currentScope->id << std::endl;
       return true;
     }
     //===Struct===
@@ -974,6 +1259,8 @@ class semantic_checker {
         ConstantInfo info{Const->identifier.value(), Const->type.get(), Const->expression.get()};
         std::cout << "declaring constant : " << Const->identifier.value() << std::endl;
         currentScope->const_table[Const->identifier.value()] = info;
+        Symbol symbol{Const->identifier.value(), Const->type.get(), false, false, true};
+        currentScope->insertVar(Const->identifier.value(), symbol);
       }
     }
 
@@ -982,20 +1269,41 @@ class semantic_checker {
       std::string type = Impl->type->toString();
       std::cout << "type of InherentImplNode : " << type << std::endl;
       if (currentScope->declared_struct.find(type) != currentScope->declared_struct.end()) {//是已经declared过的struct
-        enterScope();
         currentScope->possible_self = type;
+        std::cout << "setting current possible self : " << type << std::endl;
         for (int i = 0; i < Impl->associated_item.size(); i++) {
+          if (auto* funcNode = std::get_if<std::unique_ptr<FunctionNode>>(&Impl->associated_item[i]->associated_item)) {
+            if (funcNode->get()->block_expression && has_exit_in_block(funcNode->get()->block_expression.get())) {
+              std::cerr << "exit not allowed in methods" << std::endl;
+              return false;
+            }
+          }
+        }
+        for (int i = 0; i < Impl->associated_item.size(); i++) {
+          enterScope();
           std::cout << "checking the " << i << "th item in impl node" << std::endl;
           if (auto* funcNode = std::get_if<std::unique_ptr<FunctionNode>>(&Impl->associated_item[i]->associated_item)) {
             FunctionNode* function = funcNode->get();
 
-            FunctionSymbol func_info;
-            func_info.name = function->identifier;
-            func_info.param_types = function->function_parameter.get();
+            FunctionSymbol fs;
+            fs.name = function->identifier;
 
-            if (function->return_type) func_info.return_type = function->return_type->type.get();
+            if (function->function_parameter) {
+              fs.param_types = function->function_parameter.get();
+            }
 
-            currentScope->insertFunc(function->identifier, func_info);
+            if (function->return_type) {
+              fs.return_type = function->return_type->type.get();
+            }
+
+            fs.impl_type_name = type;
+            std::string func_to_declare = fs.impl_type_name.value() + "::" + fs.name;
+            if (function->return_type) fs.return_type = function->return_type->type.get();
+            fs.param_types = function->function_parameter.get();
+            currentScope->parent->declared_struct_functions[func_to_declare] = fs;
+            currentScope->parent->insertFunc(func_to_declare, fs);
+            std::cout << "declaring function: " << func_to_declare << " in scope: " << currentScope->parent->id << std::endl; 
+            std::cout << "size of function_table in scope function added to: " << currentScope->parent->declared_struct_functions.size() << std::endl;            
 
             if (function->block_expression) {
               std::cout << "checking blockexpression of function in scope : " << currentScope->id << std::endl;
@@ -1015,49 +1323,35 @@ class semantic_checker {
               if (!currentScope->is_forward_declared(declared_return_type) && !is_legal_type(declared_return_type)) {
                 std::cout << "undefined return type : " << declared_return_type << " in function : " << function->identifier << std::endl;
               }
-              if (function->block_expression) {
-                std::cout << "checking if the return types match in blockexpression" << std::endl;
-                std::cout << "current scope : " << currentScope->id << std::endl;
-                enterScope();
-                declareFunctionParameters(function->function_parameter.get(), currentScope, function->impl_type_name);
-                if (!check_return_type_without_changing_scope(function->block_expression.get())) {
-                  std::cout << "return type mismatch in blockexpression" << std::endl;
-                  exitScope();
-                  return false;
-                }
-                std::cout << "getting return type in blockexpression" << std::endl;
-                std::cout << "current scope : " << currentScope->id << std::endl;
-                std::string actual_return_type = get_return_type_without_changing_scope(function->block_expression.get());
-                size_t pos = actual_return_type.rfind("::");
-                if (pos != std::string::npos) {
-                  actual_return_type = actual_return_type.substr(0, pos);
-                }
-                std::cout << "declared return type: " << declared_return_type << std::endl;
-                std::cout << "actual return type: " << actual_return_type << std::endl;
-                if (declared_return_type != "Self" && declared_return_type != "self" && actual_return_type != declared_return_type) {
-                  std::cout << "[Return Type Error]: function " << function->identifier << std::endl;
-                  exitScope();
-                  return false;
-                }
+              std::cout << "checking if the return types match in blockexpression" << std::endl;
+              std::cout << "current scope : " << currentScope->id << std::endl;
+              enterScope();
+              declareFunctionParameters(function->function_parameter.get(), currentScope, function->impl_type_name);
+              if (!check_return_type_without_changing_scope(function->block_expression.get())) {
+                std::cout << "return type mismatch in blockexpression" << std::endl;
+                exitScope();
+                return false;
               }
+              std::cout << "getting return type in blockexpression" << std::endl;
+              std::cout << "current scope : " << currentScope->id << std::endl;
+              std::string actual_return_type = get_return_type_without_changing_scope(function->block_expression.get());
+              size_t pos = actual_return_type.rfind("::");
+              if (pos != std::string::npos) {
+                actual_return_type = actual_return_type.substr(0, pos);
+              }
+              if (declared_return_type == "Self" || declared_return_type == "self") {
+                declared_return_type = Impl->type->toString();
+              }
+              std::cout << "declared return type: " << declared_return_type << std::endl;
+              std::cout << "actual return type: " << actual_return_type << std::endl;
+              if (declared_return_type != "Self" && declared_return_type != "self" && actual_return_type != declared_return_type) {
+                std::cout << "[Return Type Error]: function " << function->identifier << std::endl;
+                exitScope();
+                return false;
+              }
+              exitScope();
             }
-
-            FunctionSymbol fs;
-            fs.name = function->identifier;
-
-            if (function->function_parameter) {
-              fs.param_types = function->function_parameter.get();
-            }
-
-            if (function->return_type) {
-              fs.return_type = function->return_type->type.get();
-            }
-
-            fs.impl_type_name = type;
-            std::string func_to_declare = fs.impl_type_name.value() + "::" + fs.name;
-            currentScope->parent->declared_struct_functions[func_to_declare] = fs;
-            std::cout << "declaring function: " << func_to_declare << " in scope: " << currentScope->parent->id << std::endl; 
-            std::cout << "size of function_table in scope function added to: " << currentScope->parent->declared_struct_functions.size() << std::endl;
+            exitScope();
           }
         }
         exitScope();
@@ -1153,9 +1447,17 @@ class semantic_checker {
     std::cout << "checking blockexpression" << std::endl;
     if (!block_expr) return true;
     enterScope();
+    std::cout << "number of statements : " << block_expr->statement.size() << std::endl;
     for (int i = 0; i < block_expr->statement.size(); i++) {
+      std::cout << "statement id in block expression : " << i << std::endl;
       if (!check_Statment(dynamic_cast<StatementNode*>(block_expr->statement[i].get()))) {
         exitScope();
+        return false;
+      }
+    }
+    if (block_expr->expression_without_block) {
+      if (!check_expression(block_expr->expression_without_block.get())) {
+        std::cout << "error in expression without block in block expression" << std::endl;
         return false;
       }
     }
@@ -1169,6 +1471,12 @@ class semantic_checker {
     std::cout << "number of statements : " << block_expr->statement.size() << std::endl;
     for (int i = 0; i < block_expr->statement.size(); i++) {
       if (!check_Statment(dynamic_cast<StatementNode*>(block_expr->statement[i].get()))) {
+        return false;
+      }
+    }
+    if (block_expr->expression_without_block) {
+      if (!check_expression(block_expr->expression_without_block.get())) {
+        std::cout << "error in expression without block in block expression" << std::endl;
         return false;
       }
     }
@@ -1322,6 +1630,106 @@ class semantic_checker {
         return arr->type.get();
       }
     }
+    if (auto* DerefExpr = dynamic_cast<DereferenceExpressionNode*>(expr)) {
+      std::cout << "getting type of dereference expression" << std::endl;
+      if (auto* ref = dynamic_cast<ReferenceTypeNode*>(getExpressionType(DerefExpr->expression.get()))) {
+        return ref->type.get();
+      } 
+    }
+    if (auto* field_expr = dynamic_cast<FieldExpressionNode*>(expr)) {
+      std::cout << "getting type of field expression" << std::endl;
+      if (auto* path_expr = dynamic_cast<PathExpressionNode*>(field_expr->expression.get())) {
+        std::cout << "path_expr: " << path_expr->toString() << std::endl;
+        if (path_expr->toString() == "self" || path_expr->toString() == "Self" 
+            || getExpressionType(path_expr)->toString() == "self"
+            || getExpressionType(path_expr)->toString() == "Self") {
+          if (currentScope->possible_self == "") {
+            std::cout << "invalid self" << std::endl;
+            return nullptr;
+          } else {
+            std::cout << "getting valid self : " << currentScope->possible_self << std::endl;
+            if (auto* structInfo = currentScope->lookupStruct(currentScope->possible_self)) {
+              std::string item_name = field_expr->identifier.id;
+              std::cout << "finding " << item_name << " in struct" << std::endl;
+              for (int i = 0; i < structInfo->fields.size(); i++) {
+                std::cout << "item in struct " << structInfo->name << " : " << structInfo->fields[i].name << std::endl;
+                if (structInfo->fields[i].name == item_name) {
+                  auto* t = structInfo->fields[i].type;
+                  return t;
+                }
+              }
+              std::cout << "unknown item : " << item_name << " in struct : " << path_expr->toString() << std::endl; 
+              return nullptr;
+            } else {
+              std::cout << "invalid base in FieldExpression : " << currentScope->possible_self << std::endl;
+              return nullptr;
+            }
+          }
+        } else {
+          std::string item_name = field_expr->identifier.id;
+          std::cout << "finding struct : " << path_expr->toString() << std::endl;
+          if (auto* structInfo = currentScope->lookupStruct(path_expr->toString())) {
+            std::cout << "finding item in struct : " << item_name << std::endl;
+            for (int i = 0; i < structInfo->fields.size(); i++) {
+              std::cout << "declared item in field : " << structInfo->fields[i].name << std::endl;
+              if (structInfo->fields[i].name == item_name) {
+                auto* t = structInfo->fields[i].type;
+                return t;
+              }
+            }
+            std::cout << "unknown item : " << item_name << " in struct : " << path_expr->toString() << std::endl;
+            return nullptr;
+          } else {
+            auto* type = getExpressionType(path_expr);
+            std::string typeStr;
+            if (auto* ref = dynamic_cast<ReferenceTypeNode*>(type)) {
+              typeStr = ref->type->toString();
+            } else {
+              typeStr = type->toString();
+            }
+            typeStr.erase(0, typeStr.find_first_not_of('&'));
+            if (auto* structInfo = currentScope->lookupStruct(typeStr)) {
+              std::cout << "finding item in struct : " << item_name << std::endl;
+              for (int i = 0; i < structInfo->fields.size(); i++) {
+                std::cout << "declared item in field : " << structInfo->fields[i].name << std::endl;
+                if (structInfo->fields[i].name == item_name) {
+                  auto* t = structInfo->fields[i].type;
+                  return t;
+                }
+              }
+              std::cout << "unknown item : " << item_name << " in struct : " << getExpressionType(path_expr)->toString() << std::endl;
+              return nullptr;
+            } 
+            std::cout << "invalid base in FieldExpression : " << item_name << std::endl;
+            return nullptr;
+          }
+        }
+      } else if (auto* index_expr = dynamic_cast<IndexExpressionNode*>(field_expr->expression.get())) {
+        auto* index_type = getExpressionType(index_expr);
+        if (auto* path = dynamic_cast<TypePathNode*>(index_type)) {
+          std::string item_name = path->toString();
+          std::cout << "struct in fieldexpression : " << item_name << std::endl;
+          if (auto* structInfo = currentScope->lookupStruct(item_name)) {
+            std::cout << "found strcut : " << item_name << " whose field size is " << structInfo->fields.size() << std::endl;
+            for (int i = 0; i < structInfo->fields.size(); i++) {
+              std::cout << "declared item in field : " << structInfo->fields[i].name << std::endl;
+              if (structInfo->fields[i].name == field_expr->identifier.id) {
+                auto* t = structInfo->fields[i].type;
+                return t;
+              }
+            }
+            std::cout << "unknown item : " << item_name << " in struct : " << path_expr->toString() << std::endl;
+            return nullptr;
+          } else {
+            std::cout << "strcut : " << item_name << " not found" << std::endl;
+            return nullptr;
+          }
+        }
+      }
+    }
+    if (auto* if_expr = dynamic_cast<IfExpressionNode*>(expr)) {
+      return getExpressionType(if_expr->block_expression->expression_without_block.get());
+    }
     if (auto* borrowExpr = dynamic_cast<BorrowExpressionNode*>(expr)) {
       TypeNode* type = getExpressionType(borrowExpr->expression.get());
       auto res = std::make_unique<ReferenceTypeNode>(std::unique_ptr<TypeNode>(type), borrowExpr->if_mut, 0, 0);
@@ -1334,6 +1742,7 @@ class semantic_checker {
       if (!currentScope->lookupVar(path_pattern) && !currentScope->lookupVar(path)) {
         std::cout << "Variable not found: " << path << " in scope : " << currentScope->id << std::endl;
         std::cout << "var_table size: " << currentScope->var_table.size() << std::endl;
+        return nullptr;
       }
       TypeNode* t = currentScope->lookupVar(path_pattern) ? currentScope->lookupVar(path_pattern)->type : currentScope->lookupVar(path)->type;
       std::cout << "type of pathexpression got : " << t->toString() << std::endl;
@@ -1344,6 +1753,12 @@ class semantic_checker {
       TypeNode* t = getExpressionType(arrayExpr->expressions[0].get());
       ExpressionNode* e = arrayExpr->expressions[1].get();
       if (arrayExpr->type == ArrayExpressionType::LITERAL) {
+        std::string s = t->toString();
+        size_t pos = s.rfind("::");
+        if (pos != std::string::npos) {
+          s.erase(pos);
+          t = new TypePathNode(s);
+        }
         auto res = new ArrayTypeNode(t, new LiteralExpressionNode(new integer_literal(std::to_string(arrayExpr->expressions.size())), 0, 0), 0, 0);
         return res;
       } else {
@@ -1425,7 +1840,9 @@ class semantic_checker {
               std::cout << "invalid self" << std::endl;
               return nullptr;
             } else {
+              std::cout << "getting valid self : " << currentScope->possible_self << std::endl;
               if (auto* structInfo = currentScope->lookupStruct(currentScope->possible_self)) {
+                std::cout << "getting valid struct of self" << std::endl;
                 std::string item_name = method_call_expr->PathtoString();
                 for (int i = 0; i < structInfo->fields.size(); i++) {
                   if (structInfo->fields[i].name == item_name) {
@@ -1462,14 +1879,18 @@ class semantic_checker {
       } else if (auto* field_expr = dynamic_cast<FieldExpressionNode*>(index_expr->base.get())) {
         std::cout << "the base in indexexpression is field expression" << std::endl;
         if (auto* path_expr = dynamic_cast<PathExpressionNode*>(field_expr->expression.get())) {
+          std::cout << "path_expr: " << path_expr->toString() << std::endl;
           if (path_expr->toString() == "self" || path_expr->toString() == "Self") {
             if (currentScope->possible_self == "") {
               std::cout << "invalid self" << std::endl;
               return nullptr;
             } else {
+              std::cout << "getting valid self : " << currentScope->possible_self << std::endl;
               if (auto* structInfo = currentScope->lookupStruct(currentScope->possible_self)) {
                 std::string item_name = field_expr->identifier.id;
+                std::cout << "finding item in struct : " << item_name << std::endl;
                 for (int i = 0; i < structInfo->fields.size(); i++) {
+                  std::cout << "declared item in field : " << structInfo->fields[i].name << std::endl;
                   if (structInfo->fields[i].name == item_name) {
                     auto* t = structInfo->fields[i].type;
                     if (auto* array = dynamic_cast<ArrayTypeNode*>(t)) {
@@ -1477,7 +1898,7 @@ class semantic_checker {
                     }
                   }
                 }
-                std::cout << "unknown item : " << item_name << "in struct : " << path_expr->toString() << std::endl; 
+                std::cout << "unknown item : " << item_name << " in struct : " << path_expr->toString() << std::endl; 
                 return nullptr;
               } else {
                 std::cout << "invalid base in FieldExpression : " << currentScope->possible_self << std::endl;
@@ -1486,8 +1907,11 @@ class semantic_checker {
             }
           } else {
             std::string item_name = field_expr->identifier.id;
+            std::cout << "finding struct : " << path_expr->toString() << std::endl;
             if (auto* structInfo = currentScope->lookupStruct(path_expr->toString())) {
+              std::cout << "finding item in struct : " << item_name << std::endl;
               for (int i = 0; i < structInfo->fields.size(); i++) {
+                std::cout << "declared item in field : " << structInfo->fields[i].name << std::endl;
                 if (structInfo->fields[i].name == item_name) {
                   auto* t = structInfo->fields[i].type;
                   if (auto* array = dynamic_cast<ArrayTypeNode*>(t)) {
@@ -1495,10 +1919,26 @@ class semantic_checker {
                   }
                 }
               }
-              std::cout << "unknown item : " << item_name << "in struct : " << path_expr->toString() << std::endl;
+              std::cout << "unknown item : " << item_name << " in struct : " << path_expr->toString() << std::endl;
               return nullptr;
             } else {
-              std::cout << "invalid base in FieldExpression : " << currentScope->possible_self << std::endl;
+              std::string typeStr = getExpressionType(path_expr)->toString();
+              typeStr.erase(0, typeStr.find_first_not_of('&'));
+              if (auto* structInfo = currentScope->lookupStruct(typeStr)) {
+                std::cout << "finding item in struct : " << item_name << std::endl;
+                for (int i = 0; i < structInfo->fields.size(); i++) {
+                  std::cout << "declared item in field : " << structInfo->fields[i].name << std::endl;
+                  if (structInfo->fields[i].name == item_name) {
+                    auto* t = structInfo->fields[i].type;
+                    if (auto* array = dynamic_cast<ArrayTypeNode*>(t)) {
+                      return array->type.get();
+                    }
+                  }
+                }
+                std::cout << "unknown item : " << item_name << " in struct : " << getExpressionType(path_expr)->toString() << std::endl;
+                return nullptr;
+              } 
+              std::cout << "invalid base in FieldExpression : " << item_name << std::endl;
               return nullptr;
             }
           }
@@ -1507,11 +1947,14 @@ class semantic_checker {
         std::cout << "unknown type in indexexpression" << std::endl;
       }
     }
-    //这里最后输出的结果是i32，有一个i32被当成TypePathNode
     if (auto* logic_expr = dynamic_cast<ArithmeticOrLogicalExpressionNode*>(expr)) {
       std::cout << "getting type of ArithmeticOrLogicalExpressionNode" << std::endl;
       auto* expr1 = logic_expr->expression1.get();
       auto* type = getExpressionType(expr1);
+      if (!type) {
+        std::cerr << "failed to get type of certain expression in arithmetic or logical expression" << std::endl;
+        return nullptr;
+      }
       if (auto* path_type = dynamic_cast<TypePathNode*>(type)) {
         std::string name = path_type->toString();
         if (is_legal_type(name)) return new TypePathNode(name);
@@ -1525,56 +1968,65 @@ class semantic_checker {
     }
     if (auto* ewb = dynamic_cast<ExpressionWithoutBlockNode*>(expr)) {
       return std::visit([this](auto& node_ptr) -> TypeNode* {
-          using T = std::decay_t<decltype(node_ptr)>;
+        using T = std::decay_t<decltype(node_ptr)>;
 
-          if constexpr (std::is_same_v<T, std::unique_ptr<LiteralExpressionNode>>) {
-            return getExpressionType(node_ptr.get());
-          }
-          else if constexpr (std::is_same_v<T, std::unique_ptr<PathExpressionNode>>) {
-            return getExpressionType(node_ptr.get());
-          }
-          else if constexpr (std::is_same_v<T, std::unique_ptr<OperatorExpressionNode>>) {
-            return getExpressionType(node_ptr.get());
-          }
-          else if constexpr (std::is_same_v<T, std::unique_ptr<GroupedExpressionNode>>) {
-            return getExpressionType(node_ptr->expression.get());
-          }
-          else if constexpr (std::is_same_v<T, std::unique_ptr<ArrayExpressionNode>>) {
-            return getExpressionType(node_ptr.get());
-          }
-          else if constexpr (std::is_same_v<T, std::unique_ptr<IndexExpressionNode>>) {
-            return getExpressionType(node_ptr.get());
-          }
-          else if constexpr (std::is_same_v<T, std::unique_ptr<TupleExpressionNode>>) {
-            return getExpressionType(node_ptr.get());
-          }
-          else if constexpr (std::is_same_v<T, std::unique_ptr<TupleIndexingExpressionNode>>) {
-            return getExpressionType(node_ptr.get());
-          }
-          else if constexpr (std::is_same_v<T, std::unique_ptr<StructExpressionNode>>) {
-            return getExpressionType(node_ptr.get());
-          }
-          else if constexpr (std::is_same_v<T, std::unique_ptr<CallExpressionNode>>) {
-            return getExpressionType(node_ptr.get());
-          }
-          else if constexpr (std::is_same_v<T, std::unique_ptr<MethodCallExpressionNode>>) {
-            return getExpressionType(node_ptr.get());
-          }
-          else if constexpr (std::is_same_v<T, std::unique_ptr<FieldExpressionNode>>) {
-            return getExpressionType(node_ptr.get());
-          }
-          else if constexpr (std::is_same_v<T, std::unique_ptr<RangeExpressionNode>>) {
-            return getExpressionType(node_ptr.get());
-          }
-          else if constexpr (std::is_same_v<T, std::unique_ptr<ReturnExpressionNode>>) {
-            return getExpressionType(node_ptr.get());
-          }
-          else if constexpr (std::is_same_v<T, std::unique_ptr<UnderscoreExpressionNode>>) {
-            return getExpressionType(node_ptr.get());
-          }
-          else if constexpr (std::is_same_v<T, std::unique_ptr<LazyBooleanExpressionNode>>) {
-            return getExpressionType(node_ptr.get());
-          }
+        if constexpr (std::is_same_v<T, std::unique_ptr<LiteralExpressionNode>>) {
+          return getExpressionType(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<PathExpressionNode>>) {
+          return getExpressionType(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<BreakExpressionNode>>) {
+          return getExpressionType(node_ptr->expr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<OperatorExpressionNode>>) {
+          return getExpressionType(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<GroupedExpressionNode>>) {
+          return getExpressionType(node_ptr->expression.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<ArrayExpressionNode>>) {
+          return getExpressionType(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<IndexExpressionNode>>) {
+          return getExpressionType(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<TupleExpressionNode>>) {
+          return getExpressionType(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<TupleIndexingExpressionNode>>) {
+          return getExpressionType(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<StructExpressionNode>>) {
+          return getExpressionType(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<CallExpressionNode>>) {
+          return getExpressionType(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<MethodCallExpressionNode>>) {
+          return getExpressionType(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<FieldExpressionNode>>) {
+          return getExpressionType(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<RangeExpressionNode>>) {
+          return getExpressionType(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<ReturnExpressionNode>>) {
+          return getExpressionType(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<UnderscoreExpressionNode>>) {
+          return getExpressionType(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<LazyBooleanExpressionNode>>) {
+          return getExpressionType(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<ArithmeticOrLogicalExpressionNode>>) {
+          return getExpressionType(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<TypeCastExpressionNode>>) {
+          return node_ptr->type.get();
+        }
       }, ewb->expr);
     } else if (auto* call = dynamic_cast<CallExpressionNode*>(expr)) {
       std::cout << "getting callexpression" << std::endl;
@@ -1583,15 +2035,29 @@ class semantic_checker {
         std::cout << "func name in call expression: " << name << std::endl;
         auto* func_info = currentScope->lookupFunc(name);
         if (!func_info) std::cout << "function not found in Scope: " << currentScope->id << std::endl;
+        if (!func_info->return_type) {
+          std::cout << "the function in call expression has no return type" << std::endl;
+          return nullptr;
+        }
         std::cout << "get type of callexpression : " << func_info->return_type->toString() << std::endl;
+        if (func_info->return_type->toString() == "self" || func_info->return_type->toString() == "Self") {
+          std::string s = name;
+          std::size_t pos = s.rfind("::");
+          if (pos != std::string::npos) {
+            s = s.substr(0, pos);
+          }
+          return new TypePathNode(s);
+        }
         return func_info->return_type;
       } else {
         std::cout << "fail to get type of callexpression" << std::endl;
         return nullptr;
       }
     } else if (auto* typecast = dynamic_cast<TypeCastExpressionNode*>(expr)) {
+      std::cout << "getting type of typecast expression" << std::endl;
       return typecast->type.get();
     } else if (auto* index = dynamic_cast<IndexExpressionNode*>(expr)) {
+      std::cout << "getting type of index expression" << std::endl;
       if (auto* path = dynamic_cast<PathExpressionNode*>(index->base.get())) {
         auto* type = currentScope->lookupVar(path->toString());
         if (auto* arrayType = dynamic_cast<ArrayTypeNode*>(type->type)) {
@@ -1602,9 +2068,38 @@ class semantic_checker {
     } else if (auto* paren = dynamic_cast<GroupedExpressionNode*>(expr)) {
       std::cout << "get type of grouped expression : " << getExpressionType(paren->expression.get())->toString() << std::endl;
       return getExpressionType(paren->expression.get());
+    } else if (auto* neg = dynamic_cast<NegationExpressionNode*>(expr)) {
+      std::cout << "getting type of negation expression" << std::endl;
+      return getExpressionType(neg->expression.get());
+    } else if (auto* comp = dynamic_cast<ComparisonExpressionNode*>(expr)) {
+      std::cout << "getting type of comparison expression" << std::endl;
+      return new TypePathNode("bool");
+    } else if (auto* lazy_bool = dynamic_cast<LazyBooleanExpressionNode*>(expr)) {
+      std::cout << "getting type of lazy bool expression" << std::endl;
+      return new TypePathNode("bool");
+    } else if (auto* struct_expr = dynamic_cast<StructExpressionNode*>(expr)) {
+      std::cout << "getting type of struct expression" << std::endl;
+      std::string struct_name = struct_expr->pathin_expression->toString();
+      return new TypePathNode(struct_name);
+    } else if (auto* method_call = dynamic_cast<MethodCallExpressionNode*>(expr)) {
+      std::cout << "getting type of method call expression" << std::endl;
+      auto* type = getExpressionType(method_call->expression.get());
+      if (auto* type_path = dynamic_cast<TypePathNode*>(type)) {
+        std::string base = type_path->toString();
+        std::cout << "base of methodcall expression : " << base << std::endl;
+        std::string func_name = method_call->PathtoString();
+        std::cout << "function of methodcall expression: " << func_name << std::endl;
+        std::string func = base + "::" + func_name;
+        auto* func_type = currentScope->get_function_type(func);
+        if (!func_type) {
+          std::cout << "function: " << func << " not found" << std::endl;
+          return nullptr;
+        }
+        return func_type;
+      }
     }
     // TODO: 其他表达式类型...
-    std::cout << "other type of expression" << std::endl;
+    std::cout << "other type of expression : " << typeid(expr).name() << std::endl;
     return nullptr;
   }
 
@@ -1744,8 +2239,41 @@ class semantic_checker {
     if (expr->let_statement == nullptr) return true;
     LetStatement& letStatement = *(expr->let_statement);
 
+    if (!check_expression(letStatement.expression.get())) {
+      std::cerr << "error in expression in letstatement" << std::endl;
+      return false;
+    }
+
+    if (auto* if_expr = dynamic_cast<IfExpressionNode*>(letStatement.expression.get())) {
+      std::cout << "checking return type of if expression in letstatement" << std::endl;
+      auto types = get_return_type_in_if(if_expr);
+      if(types.size() != 1) {
+        std::cout << "return-type mismatch in if expression" << std::endl;
+        return false;
+      }
+    }
+
+    if (!getExpressionType(letStatement.expression.get())) {
+      std::cout << "failed to get type of expression in letstatement" << std::endl;
+      return false;
+    }
+
+    if (letStatement.type->toString() != getExpressionType(letStatement.expression.get())->toString()) {
+      std::cout << "declared type : " << letStatement.type->toString() << std::endl;
+      std::cout << "type of rhs : " << getExpressionType(letStatement.expression.get())->toString() << std::endl;
+      if (!(letStatement.type->toString() == "usize" && getExpressionType(letStatement.expression.get())->toString() == "i32")) {
+        std::cerr << "type mismatch in letstatement" << std::endl;
+        return false;
+      }
+    }
+
+    if (auto* possible_underscore = dynamic_cast<UnderscoreExpressionNode*>(expr->let_statement->expression.get())) {
+      std::cerr << "underscore expression is not allowed in RHS" << std::endl;
+      throw std::runtime_error("underscore expression is not allowed in RHS");
+    }
+
     try {
-      std::cout << "try to declare var : " << letStatement.pattern->toString()  << " in scope :" << currentScope->id << std::endl;
+      std::cout << "try to declare var : " << letStatement.pattern->toString()  << " in scope :" << currentScope->id << "whose if_mut is " << letStatement.get_if_mutable() << std::endl;
       declareVariable(letStatement.pattern->toString(), letStatement.type.get(), letStatement.get_if_mutable());
     } catch (const std::exception& e) {
       std::cerr << "[Declare Error in LetStatement] : " << e.what() << std::endl;
@@ -1755,12 +2283,64 @@ class semantic_checker {
       //检查数量
       auto *rhs = dynamic_cast<ArrayExpressionNode*>(letStatement.expression.get());
       auto *call_expr = dynamic_cast<CallExpressionNode*>(letStatement.expression.get());
-      if (!rhs && !call_expr) {
-        std::cout << "Expected array expression in array assignment" << std::endl;
+      auto *path_expr = dynamic_cast<PathExpressionNode*>(letStatement.expression.get());
+      auto *index_expr = dynamic_cast<IndexExpressionNode*>(letStatement.expression.get());
+      auto *method_call = dynamic_cast<MethodCallExpressionNode*>(letStatement.expression.get());
+      auto *field = dynamic_cast<FieldExpressionNode*>(letStatement.expression.get());
+      if (!rhs && !call_expr && !path_expr && !index_expr && !method_call && !field) {
+        std::cout << "Expected array expression, pathexpression, indexexpression, field expression or call expression in array assignment" << std::endl;
+        std::cout << "expression type in letstatement : " << typeid(*letStatement.expression.get()).name() << std::endl;
         return false;
+      }
+      if (method_call) {
+        return true;
       }
       if (call_expr) {
         return true;
+      }
+      if (index_expr) {
+        return true;
+      }
+      if (field) {
+        return true;
+      }
+      if (path_expr) {
+        auto* symbol = currentScope->lookupVar(path_expr->toString());
+        if (symbol) {
+          if (auto* array_type = dynamic_cast<ArrayTypeNode*>(symbol->type)) {
+            int declaredLength = -1;
+            if (auto *lenLit = dynamic_cast<LiteralExpressionNode*>(d->expression.get())) {
+              if (auto& intLit = std::get<std::unique_ptr<integer_literal>>(lenLit->literal)) {
+                declaredLength = std::stoi(intLit->value);
+              } else {
+                std::cout << "wrong type of length in initializer" << std::endl;
+                return false;
+              }
+            }
+            int itemLength = -1;
+            if (auto *lenLit = dynamic_cast<LiteralExpressionNode*>(array_type->expression.get())) {
+              if (auto& intLit = std::get<std::unique_ptr<integer_literal>>(lenLit->literal)) {
+                itemLength = std::stoi(intLit->value);
+              } else {
+                std::cout << "wrong type of length in initializer" << std::endl;
+                return false;
+              }
+            }
+            if (itemLength != declaredLength) {
+              std::cout << "itemLength: " << itemLength << std::endl;
+              std::cout << "declaredLength: " << declaredLength << std::endl;
+              std::cout << "length mismatch in array assignment in letstatement" << std::endl;
+              return false;
+            }
+          } else {
+            std::cout << "type mismatch in letstatement, left: arraytype" << std::endl;
+            return false;
+          }
+        }
+        else {
+          std::cout << "var not found :" << path_expr->toString() << std::endl;
+          return false;
+        }
       }
       int declaredLength = -1;
       if (auto *lenLit = dynamic_cast<LiteralExpressionNode*>(d->expression.get())) {
@@ -1775,6 +2355,24 @@ class semantic_checker {
       if (rhs->type == ArrayExpressionType::LITERAL) {
         std::cout << "get literal array expression" << std::endl;
         itemLength = rhs->expressions.size();
+        std::string type = getExpressionType(rhs->expressions[0].get())->toString();
+        size_t pos = type.rfind("::");
+        if (pos != std::string::npos) {
+          type.erase(pos);
+        }
+        for (int i = 1; i < itemLength; i++) {
+          std::string temp_type = getExpressionType(rhs->expressions[i].get())->toString();
+          size_t pos = temp_type.rfind("::");
+          if (pos != std::string::npos) {
+            temp_type.erase(pos);
+          }
+          if (temp_type != type) {
+            std::cout << "type of expression[0] in array : " << type << std::endl;
+            std::cout << "type of expression[" << i << "] in array : " << temp_type << std::endl;
+            std::cerr << "type mismatch in array" << std::endl;
+            return false;
+          }
+        }
       } else {
         if (rhs->expressions.size() != 2) {
           std::cout << "wrong number of expressions for repeat type of arrayExpression" << std::endl;
@@ -1905,11 +2503,41 @@ class semantic_checker {
     std::cout << "getting types in logic_expr" << std::endl;
     std::vector<TypeNode*> res;
     auto ex = get_item_in_logic_expr(expr);
+    bool has_usize = false;
     for (int i = 0; i < ex.size(); i++) {
-      res.push_back(getExpressionType(ex[i]));
-      std::cout << getExpressionType(ex[i])->toString() << std::endl;
+      auto* t = getExpressionType(ex[i]);
+      if (!t) {
+        res.push_back(nullptr);
+      } else {
+        res.push_back(t);
+        if (t->toString() == "usize") has_usize = true;
+        std::cout << res[res.size() - 1]->toString() << std::endl;
+      }
+    }
+    for (int i = 0; i < ex.size(); i++) {
+      auto* t = getExpressionType(ex[i]);
+      if (!t) continue;
+      if (t->toString() == "i32") {
+        if (auto* lit = dynamic_cast<LiteralExpressionNode*>(ex[i])) {
+          if (lit->toString()[0] != '-') {
+            if (has_usize) {
+              res.erase(res.begin() + i);
+            }
+          }
+        }
+      }
     }
     return res;
+  }
+
+  bool check_conditions(const Conditions* condition) {
+    if (std::holds_alternative<LetChain>(condition->condition)) {
+      return true;
+    }
+   
+    auto& expr_ptr = std::get<std::unique_ptr<ExpressionNode>>(condition->condition);
+    std::cout << "checking expression in conditions" << std::endl;
+    return check_expression(expr_ptr.get());
   }
 
   bool check_expression(const ExpressionNode* expr) {
@@ -1918,14 +2546,96 @@ class semantic_checker {
       auto types = get_logic_expr_types(d);
       std::unordered_set<std::string> t;
       for (int i = 0; i < types.size(); i++) {
-        t.insert(types[i]->toString());
+        if (!types[i]) {
+          std::cout << "get expression type error in arithmetic or logical expression" << std::endl;
+          return false;
+        } else t.insert(types[i]->toString());
       }
-      if (t.size() != 1) return false;
+      if (t.size() != 1) {
+        std::cout << "type mismatch in ArithmeticOr Logical expression" << std::endl;
+        return false;
+      }
+    } else if (auto *lazybool = dynamic_cast<const LazyBooleanExpressionNode*>(expr)) {
+      return check_expression(lazybool->expression1.get()) && check_expression(lazybool->expression2.get());
+    } else if (auto *ewb = dynamic_cast<const ExpressionWithoutBlockNode*>(expr)) {
+      return std::visit([this](auto& node_ptr) -> bool {
+        using T = std::decay_t<decltype(node_ptr)>;
+
+        if constexpr (std::is_same_v<T, std::unique_ptr<LiteralExpressionNode>>) {
+          return check_expression(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<PathExpressionNode>>) {
+          return check_expression(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<BreakExpressionNode>>) {
+          return check_expression(node_ptr->expr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<OperatorExpressionNode>>) {
+          return check_expression(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<GroupedExpressionNode>>) {
+          return check_expression(node_ptr->expression.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<ArrayExpressionNode>>) {
+          return check_expression(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<IndexExpressionNode>>) {
+          return check_expression(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<TupleExpressionNode>>) {
+          return check_expression(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<TupleIndexingExpressionNode>>) {
+          return check_expression(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<StructExpressionNode>>) {
+          return check_expression(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<CallExpressionNode>>) {
+          return check_expression(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<MethodCallExpressionNode>>) {
+          return check_expression(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<FieldExpressionNode>>) {
+          return check_expression(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<RangeExpressionNode>>) {
+          return check_expression(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<ReturnExpressionNode>>) {
+          return check_expression(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<UnderscoreExpressionNode>>) {
+          return check_expression(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<LazyBooleanExpressionNode>>) {
+          return check_expression(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<ArithmeticOrLogicalExpressionNode>>) {
+          return check_expression(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<TypeCastExpressionNode>>) {
+          return check_expression(node_ptr.get());
+        }
+      }, ewb->expr);
     } else if (auto *d = dynamic_cast<const PredicateLoopExpressionNode*>(expr)) {
       std::cout << "checking predicate loop expression" << std::endl;
-      return check_BlockExpression(d->block_expression.get());
+      if (!d->conditions || !check_conditions(d->conditions.get()) || !d->conditions->check()) {
+        std::cerr << "error in conditions" << std::endl;
+        return false;
+      }
+      enterScope();
+      currentScope->if_cycle = true;
+      bool res = check_BlockExpression_without_changing_scope(d->block_expression.get());
+      exitScope();
+      return res;
     } else if (auto *d = dynamic_cast<const IfExpressionNode*>(expr)) {
       std::cout << "checking if expression" << std::endl;
+      if (!check_conditions(d->conditions.get()) || !d->conditions->check()) {
+        std::cerr << "error in conditions" << std::endl;
+        return false;
+      }
       if (d->block_expression) {
         if (!check_BlockExpression(d->block_expression.get())) return false;
       }
@@ -1933,14 +2643,24 @@ class semantic_checker {
         if (!check_BlockExpression(d->else_block.get())) return false;
       }
       if (d->else_if) {
-        if (!check_expression(d->else_if)) return false;
+        std::cout << "checking else_if" << std::endl;
+        if (!check_expression(d->else_if.get())) return false;
       }
       return true;
     } else if (auto *d = dynamic_cast<const ComparisonExpressionNode*>(expr)) {
       std::cout << "checking ComparisonExpressionNode" << std::endl;
       if (!check_ComparisonExpression(d)) return false;
     } else if (auto *d = dynamic_cast<const LazyBooleanExpressionNode*>(expr)) {
-      if (!isSameDerived(d->expression1, d->expression2)) return false;
+      std::cout << "checking lazy bool expression" << std::endl;
+      if (!getExpressionType(d->expression1.get()) || getExpressionType(d->expression2.get())) {
+        std::cout << "fail to get type in expression" << std::endl;
+        return false;
+      }
+      if (getExpressionType(d->expression1.get())->toString() != getExpressionType(d->expression2.get())->toString()) {
+        std::cout << "type of expression1 : " << getExpressionType(d->expression1.get())->toString() << std::endl;
+        std::cout << "type of expression2 : " << getExpressionType(d->expression2.get())->toString() << std::endl;
+        return false;
+      }
     } else if (auto *d = dynamic_cast<const CompoundAssignmentExpressionNode*>(expr)) {
       //检查expr1是否mutable
       auto* ex = d->expression1.get();
@@ -1967,9 +2687,36 @@ class semantic_checker {
       }
     } else if (auto *d = dynamic_cast<const AssignmentExpressionNode*>(expr)) {
       std::cout << "checking assignment expression node" << std::endl;
+      if (!check_expression(d->expression1.get()) || !check_expression(d->expression2.get())) {
+        std::cout << "error in expression of assignment expression" << std::endl;
+        return false;
+      }
+      auto* t1 = getExpressionType(d->expression1.get());
+      auto* t2 = getExpressionType(d->expression2.get());
+      std::string type1 = t1->toString();
+      std::string type2 = t2->toString();
+      if (auto* ref = dynamic_cast<ReferenceTypeNode*>(t1)) {
+        type1 = ref->type->toString();
+      }
+      if (auto* ref = dynamic_cast<ReferenceTypeNode*>(t2)) {
+        type2 = ref->type->toString();
+      }
+      if (type1 == "i32" && type2 == "usize") type2 = "i32";
+      if (type1 != type2) {
+        std::cout << "type mismatch in assignment : " << std::endl;
+        std::cout << "type1 : " << type1 << std::endl;
+        std::cout << "type2 : " << type2 << std::endl;
+        return false;
+      }
       if (auto *expr1 = dynamic_cast<const IndexExpressionNode*>(d->expression1.get())) {
+        std::cout << "the first expression of assignment is index expression" << std::endl;
+        if (getExpressionType(expr1->index.get())->toString() == "bool") {
+          std::cout << "index cannot be a boolean type" << std::endl;
+          return false;
+         }
         //检查ArrayPattern是否mutable
         if (auto *path_expression = dynamic_cast<PathExpressionNode*>(expr1->base.get())) {
+          std::cout << "the base of index expression is pathexpression" << std::endl;
           std::string id = std::visit([](auto &ptr) {
             using T = std::decay_t<decltype(ptr)>;
             if constexpr (std::is_same_v<T, std::unique_ptr<PathInExpression>>) {
@@ -2010,8 +2757,12 @@ class semantic_checker {
             if (!symbol->isMutable) std::cout << "the array is not mutable" << std::endl;
             return symbol->isMutable;
           }
+        } else if (auto *method_call = dynamic_cast<MethodCallExpressionNode*>(expr1->base.get())) {
+          std::cout << "the base of index expression is method call expression" << std::endl;
+          return true;
         } else {
-          return false;
+          std::cout << "unknown type of expression of base of indexexpression : " << typeid(expr1->base.get()).name() << std::endl;
+          return true;
         }
       }
     } else if (auto *callExpr = dynamic_cast<const MethodCallExpressionNode*>(expr)) {
@@ -2027,8 +2778,10 @@ class semantic_checker {
         }
         if (!symbol) {
           std::cout << "var not found: " << pattern << std::endl;
+          return false;
         }
         bool var_if_mut = symbol->isMutable;
+        if (var == "self" || var == "Self") var_if_mut = true;
         auto *type = symbol->type;
         if (auto *reference_type = dynamic_cast<ReferenceTypeNode*>(type)) {
           if (auto *t = dynamic_cast<TypePathNode*>(reference_type->type.get())) {
@@ -2078,13 +2831,156 @@ class semantic_checker {
           }
         }
       }
+      std::cout << "finish checking methodcall expression" << std::endl;
+    } else if (auto *inf = dynamic_cast<const InfiniteLoopExpressionNode*>(expr)) {
+      std::cout << "checking infinite loop expression" << std::endl;
+      enterScope();
+      currentScope->if_cycle = true;
+      bool res = check_BlockExpression_without_changing_scope(inf->block_expression.get());
+      exitScope();
+      return res;
+    } else if (auto * break_expr = dynamic_cast<const BreakExpressionNode*>(expr)) {
+      if (!currentScope->if_cycle == true) {
+        std::cout << "break not in loop" << std::endl;
+        return false;
+      }
+      return true;
+    } else if (auto* block = dynamic_cast<const BlockExpressionNode*>(expr)) {
+      enterScope();
+      bool res = check_BlockExpression_without_changing_scope(block);
+      exitScope();
+      return res;
+    } else if (auto* block = dynamic_cast<const GroupedExpressionNode*>(expr)) {
+      std::cout << "checking grouped expression" << std::endl;
+      bool res = check_expression(block->expression.get());
+      return res;
+    } else if (auto* return_expr = dynamic_cast<const ReturnExpressionNode*>(expr)) {
+      std::cout << "checking return expression" << std::endl;
+      bool res = check_expression(return_expr->expression.get());
+      return res;
+    } else if (auto* index_expr = dynamic_cast<const IndexExpressionNode*>(expr)) {
+      std::cout << "checking index expression" << std::endl;
+      std::string type = getExpressionType(index_expr->index.get())->toString();
+      if (type == "bool" || type == "str" || type == "&str") {
+        std::cout << "invalid type of index in index expression : " << type << std::endl;
+        return false;
+      }
+      return true;
+    } else if (auto* struct_expr = dynamic_cast<const StructExpressionNode*>(expr)) {
+      std::cout << "checking struct expression" << std::endl;
+      std::string struct_name = struct_expr->pathin_expression->toString();
+      std::cout << "name of the struct : " << struct_name << std::endl;
+      auto* struct_info = currentScope->lookupStruct(struct_name);
+      int declared_item_num = struct_info->fields.size();
+      int actual_item_num = struct_expr->struct_expr_fields->struct_expr_fields.size();
+      std::cout << "declared item num : " << declared_item_num << std::endl;
+      std::cout << "actual item num : " << actual_item_num << std::endl;
+      if (declared_item_num != actual_item_num) {
+        return false;
+      }
+      for (int i = 0; i < declared_item_num; i++) {
+        auto* type1 = struct_info->fields[i].type;
+        auto* type2 = getExpressionType(struct_expr->struct_expr_fields->struct_expr_fields[i]->expression.get());
+        if (!is_type_equal(type1, type2)) {
+          std::cout << "type of def : " << type1->toString() << std::endl;
+          std::cout << "type of declare : " << type2->toString() << std::endl;
+          if (!(type1->toString() == "usize" && type2->toString() == "i32")) {
+            std::cout << "type mismatch in struct expression with id: " << i << std::endl;
+            return false;
+          } else {
+            auto* lit = dynamic_cast<LiteralExpressionNode*>(struct_expr->struct_expr_fields->struct_expr_fields[i]->expression.get());
+            if (lit->toString()[0] == '-') {//声明usize但是定义是负数
+              std::cout << "type mismatch in struct expression with id: " << i << std::endl;
+              return false;
+            }
+          }
+        }
+      }
+      std::cout << "finish checking struct expression" << std::endl;
+      return true;
+    } else if (auto* call_expr = dynamic_cast<const CallExpressionNode*>(expr)) {
+      if (auto* temp = dynamic_cast<PathExpressionNode*>(call_expr->expression.get())) {
+        std::string func_name = dynamic_cast<PathExpressionNode*>(call_expr->expression.get())->toString();
+        if (func_name == "printInt" || func_name == "exit" || func_name == "println" || func_name == "printlnInt") {
+          if (func_name == "exit") {
+            if (!call_expr->call_params || call_expr->call_params->expressions.size() != 1) {
+              return false;
+            }
+            std::string t = getExpressionType(call_expr->call_params->expressions[0].get())->toString();
+            std::cout << "type of param in exit expression : " << t << std::endl;
+            if (t != "i32") {
+              std::cerr << "param except i32 not allowed in 'exit' function" << std::endl;
+              return false;
+            }
+          }
+          std::cout << "finish checking expression" << std::endl;
+          return true;
+        }
+        if (!currentScope->is_forward_declared(func_name)) {
+          std::cout << "function: " << func_name << " not found" << std::endl;
+          return false;
+        }
+        if (call_expr->call_params) {
+          for (int i = 0; i < call_expr->call_params->expressions.size(); i++) {
+            if (auto* lit_expr = dynamic_cast<LiteralExpressionNode*>(call_expr->call_params->expressions[i].get())) {
+              if (std::holds_alternative<std::unique_ptr<integer_literal>>(lit_expr->literal)) {
+                std::string num = lit_expr->toString();
+                std::cout << "integer literal in function param: " << num << std::endl;
+                if (isOverflow(num)) {
+                  std::cout << "overflow of integer_literal in call expression" << std::endl;
+                  return false;
+                }
+              }
+            }
+          }
+          auto* func_param = currentScope->find_func_param(func_name);
+          if (!func_param) {
+            std::cout << "function : " << func_name << " not found" << std::endl;
+          }
+          std::cout << "size of function param: " << func_param->function_params.size() << std::endl;
+          for (int i = 0; i < call_expr->call_params->expressions.size(); i++) {
+            std::string type1 = getExpressionType(call_expr->call_params->expressions[i].get())->toString();
+            std::cout << "type of call param : " << type1 << std::endl;
+            std::string type2 = getFunctionParamTypeString(func_param->function_params[i].get());
+            std::cout << "type of function param : " << type2 << std::endl;
+            if (type1 == "i32" && type2 == "usize") {
+              if (auto* lit = dynamic_cast<LiteralExpressionNode*>(call_expr->call_params->expressions[i].get())) {
+                if (lit->toString()[0] != '-') {
+                  type1 = "usize";
+                } 
+              }
+            }
+            if (type1 != type2) {
+              std::cout << "type mismatch in call expression" << std::endl;
+              return false;
+            }
+          }
+        }
+      }
     }
+    std::cout << "finish checking expression" << std::endl;
     return true;
   }
 
-  void forward_declare(const ItemNode* expr) {
+  bool forward_declare(const ItemNode* expr) {
+    //插入getInt()
+    //printInt()是一个单独的expression，这里不加没关系
+    std::string func_name = "getInt";
+    TypeNode* return_type = new TypePathNode("i32");
+    std::vector<std::unique_ptr<FunctionParam>> fp;
+    auto* parameter = new FunctionParameter(2, std::move(fp));
+    auto func_info = FunctionSymbol{func_name, parameter, return_type, std::nullopt};
+    currentScope->insertFunc(func_name, func_info);
+    currentScope->symbol_table.function_types.insert({func_name, return_type});
+    currentScope->symbol_table.functions.insert({func_name, parameter});
     if (auto* func = dynamic_cast<const FunctionNode*>(expr)) {
+      if (currentScope->get_function_type(func->identifier) != nullptr) {
+        std::cout << "redefinition of function : " << func->identifier << std::endl;
+        return false;
+      }
       currentScope->symbol_table.functions.insert({func->identifier, func->function_parameter.get()});
+      if (func->return_type) currentScope->symbol_table.function_types.insert({func->identifier, func->return_type->type.get()});
+      std::cout << "inserting function : " << func->identifier << std::endl;
     } else if (auto* structstruct = dynamic_cast<const StructStructNode*>(expr)) {
       std::cout << "inserting structstruct : " << structstruct->identifier << std::endl;
       currentScope->symbol_table.structs.insert(structstruct->identifier);
@@ -2127,6 +3023,10 @@ class semantic_checker {
           std::string func = base + "::" + node->identifier;
           std::cout << "inserting : " << func << std::endl;
           currentScope->symbol_table.functions[func] = node->function_parameter.get();
+          if (node->return_type) {
+            std::cout << "inserting function return type of function: " << func << std::endl;
+            currentScope->symbol_table.function_types[func] = node->return_type->type.get();
+          }
         }
       }
     } else if (auto* Enum = dynamic_cast<const EnumerationNode*>(expr)) {
@@ -2153,13 +3053,17 @@ class semantic_checker {
         }
       }
     }
+    return true;
   }
  
   bool check() {
     for (int i = 0; i < ast.size(); i++) {
       if (auto item = dynamic_cast<ItemNode*>(ast[i].get())) {
         std::cout << "forward declaring item which is the " << i << "th node in ast" << std::endl;
-        forward_declare(item);
+        if (!forward_declare(item)) {
+          std::cerr << "error in forward declaring" << std::endl;
+          return false;
+        };
       }
     }
 
