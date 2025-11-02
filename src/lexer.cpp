@@ -178,7 +178,7 @@ std::vector<Token> lexer::tokenize() {
     if (tok.type == TokenType::UNKNOWN && tok.value.empty()) {
       break;
     }
-    tokens.push_back(tok);
+    if (tok.value != "\n" && tok.type != TokenType::UNKNOWN) tokens.push_back(tok);
   }
   return tokens;
 }

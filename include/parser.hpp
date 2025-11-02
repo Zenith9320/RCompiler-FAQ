@@ -1450,6 +1450,7 @@ class UnderscoreExpressionNode;
 class LazyBooleanExpressionNode;
 class ArithmeticOrLogicalExpressionNode;
 class TypeCastExpressionNode;
+class NegationExpressionNode;
 
 
 //ExpressionWithoutBlock → LiteralExpression | PathExpression | OperatorExpression | GroupedExpression | ArrayExpression | AwaitExpression
@@ -1458,7 +1459,7 @@ class TypeCastExpressionNode;
 //                        | RangeExpression | ReturnExpression | UnderscoreExpression | MacroInvocation
 class ExpressionWithoutBlockNode : public ExpressionNode {
  public:
-  std::variant<std::unique_ptr<LiteralExpressionNode>, std::unique_ptr<PathExpressionNode>, std::unique_ptr<OperatorExpressionNode>,
+  std::variant<std::unique_ptr<LiteralExpressionNode>, std::unique_ptr<PathExpressionNode>, std::unique_ptr<OperatorExpressionNode>, std::unique_ptr<NegationExpressionNode>,
               std::unique_ptr<GroupedExpressionNode>, std::unique_ptr<ArrayExpressionNode>, std::unique_ptr<IndexExpressionNode>, std::unique_ptr<TypeCastExpressionNode>,
               std::unique_ptr<TupleExpressionNode>, std::unique_ptr<TupleIndexingExpressionNode>, std::unique_ptr<StructExpressionNode>, std::unique_ptr<BreakExpressionNode>,
               std::unique_ptr<CallExpressionNode>, std::unique_ptr<MethodCallExpressionNode>, std::unique_ptr<FieldExpressionNode>, std::unique_ptr<ArithmeticOrLogicalExpressionNode>,
@@ -2903,7 +2904,12 @@ class BorrowExpressionParselet : public PrefixParselet {
 class DereferenceExpressionParselet : public PrefixParselet {
  public:
   std::unique_ptr<ExpressionNode> parse(parser& p, const Token& token) override {
-    auto expr = p.parseExpression(5.0);
+    std::cout << "parsing dereference expression" << std::endl;
+    auto expr = p.parseExpression(50);
+    if (auto* lit = dynamic_cast<LiteralExpressionNode*>(expr.get())) {
+      std::cerr << "literal not allowed after dereference" << std::endl;
+      throw std::runtime_error("literal after * not allowed");
+    }
     return std::make_unique<DereferenceExpressionNode>(
       std::move(expr),
       token.line, token.column
@@ -3823,6 +3829,7 @@ class LazyBooleanExpressionParselet : public InfixParselet {
     const Token& token,
     parser& p
   ) override {
+    std::cout << "parsing lazy boolean expression" << std::endl;
     auto right = p.parseExpression(precedence);
 
     LazyBooleanType type;
@@ -4206,39 +4213,42 @@ Parser
     prefixParselets[{PUNCTUATION, "&"}] = std::make_shared<BorrowExpressionParselet>();
     prefixParselets[{PUNCTUATION, "&&"}] = std::make_shared<BorrowExpressionParselet>();
     prefixParselets[{PUNCTUATION, "*"}] = std::make_shared<DereferenceExpressionParselet>();
-    infixParselets[{PUNCTUATION, "+"}]  = std::make_shared<ArithmeticOrLogicalExpressionNodeParselet>(10.0, OperationType::ADD);
-    infixParselets[{PUNCTUATION, "-"}]  = std::make_shared<ArithmeticOrLogicalExpressionNodeParselet>(10.0, OperationType::MINUS);
-    infixParselets[{PUNCTUATION, "*"}]  = std::make_shared<ArithmeticOrLogicalExpressionNodeParselet>(20.0, OperationType::MUL);
-    infixParselets[{PUNCTUATION, "/"}]  = std::make_shared<ArithmeticOrLogicalExpressionNodeParselet>(20.0, OperationType::DIV);
-    infixParselets[{PUNCTUATION, "%"}]  = std::make_shared<ArithmeticOrLogicalExpressionNodeParselet>(20.0, OperationType::MOD);
-    infixParselets[{PUNCTUATION, "&"}]  = std::make_shared<ArithmeticOrLogicalExpressionNodeParselet>(5.0, OperationType::AND);
-    infixParselets[{PUNCTUATION, "|"}]  = std::make_shared<ArithmeticOrLogicalExpressionNodeParselet>(4.0, OperationType::OR);
-    infixParselets[{PUNCTUATION, "^"}]  = std::make_shared<ArithmeticOrLogicalExpressionNodeParselet>(6.0, OperationType::XOR);
-    infixParselets[{PUNCTUATION, "<<"}] = std::make_shared<ArithmeticOrLogicalExpressionNodeParselet>(15.0, OperationType::SHL);
-    infixParselets[{PUNCTUATION, ">>"}] = std::make_shared<ArithmeticOrLogicalExpressionNodeParselet>(15.0, OperationType::SHR);
-    infixParselets[{PUNCTUATION, "="}] = std::make_shared<AssignmentExpressionParselet>(1.0);
-    infixParselets[{PUNCTUATION, "+="}]  = std::make_shared<CompoundAssignmentExpressionParselet>(1.0);
-    infixParselets[{PUNCTUATION, "-="}]  = std::make_shared<CompoundAssignmentExpressionParselet>(1.0);
-    infixParselets[{PUNCTUATION, "*="}]  = std::make_shared<CompoundAssignmentExpressionParselet>(1.0);
-    infixParselets[{PUNCTUATION, "/="}]  = std::make_shared<CompoundAssignmentExpressionParselet>(1.0);
-    infixParselets[{PUNCTUATION, "%="}]  = std::make_shared<CompoundAssignmentExpressionParselet>(1.0);
-    infixParselets[{PUNCTUATION, "&="}]  = std::make_shared<CompoundAssignmentExpressionParselet>(1.0);
-    infixParselets[{PUNCTUATION, "|="}]  = std::make_shared<CompoundAssignmentExpressionParselet>(1.0);
-    infixParselets[{PUNCTUATION, "^="}]  = std::make_shared<CompoundAssignmentExpressionParselet>(1.0);
-    infixParselets[{PUNCTUATION, "<<="}] = std::make_shared<CompoundAssignmentExpressionParselet>(1.0);
-    infixParselets[{PUNCTUATION, ">>="}] = std::make_shared<CompoundAssignmentExpressionParselet>(1.0);
-    infixParselets[{PUNCTUATION, "["}] = std::make_shared<IndexExpressionParselet>(30);
+    infixParselets[{PUNCTUATION, "("}]  = std::make_shared<CallExpressionParselet>(50.0);
+    infixParselets[{PUNCTUATION, "."}]  = std::make_shared<DotExpressionParselet>(40.0);
+    infixParselets[{PUNCTUATION, "["}]  = std::make_shared<IndexExpressionParselet>(30.0);
+    infixParselets[{STRICT_KEYWORD, "as"}] = std::make_shared<TypeCastExpressionParselet>(39.0);
+    infixParselets[{PUNCTUATION, "*"}]  = std::make_shared<ArithmeticOrLogicalExpressionNodeParselet>(25.0, OperationType::MUL);
+    infixParselets[{PUNCTUATION, "/"}]  = std::make_shared<ArithmeticOrLogicalExpressionNodeParselet>(25.0, OperationType::DIV);
+    infixParselets[{PUNCTUATION, "%"}]  = std::make_shared<ArithmeticOrLogicalExpressionNodeParselet>(25.0, OperationType::MOD);
+    infixParselets[{PUNCTUATION, "+"}]  = std::make_shared<ArithmeticOrLogicalExpressionNodeParselet>(24.0, OperationType::ADD);
+    infixParselets[{PUNCTUATION, "-"}]  = std::make_shared<ArithmeticOrLogicalExpressionNodeParselet>(24.0, OperationType::MINUS);
+    infixParselets[{PUNCTUATION, "<<"}] = std::make_shared<ArithmeticOrLogicalExpressionNodeParselet>(23.0, OperationType::SHL);
+    infixParselets[{PUNCTUATION, ">>"}] = std::make_shared<ArithmeticOrLogicalExpressionNodeParselet>(23.0, OperationType::SHR);
+    infixParselets[{PUNCTUATION, "<"}]  = std::make_shared<ComparisonExpressionNodeParselet>(22.0);
+    infixParselets[{PUNCTUATION, "<="}] = std::make_shared<ComparisonExpressionNodeParselet>(22.0);
+    infixParselets[{PUNCTUATION, ">"}]  = std::make_shared<ComparisonExpressionNodeParselet>(22.0);
+    infixParselets[{PUNCTUATION, ">="}] = std::make_shared<ComparisonExpressionNodeParselet>(22.0);
+    infixParselets[{PUNCTUATION, "&"}]  = std::make_shared<ArithmeticOrLogicalExpressionNodeParselet>(22.0, OperationType::AND);
+    infixParselets[{PUNCTUATION, "^"}]  = std::make_shared<ArithmeticOrLogicalExpressionNodeParselet>(21.5, OperationType::XOR);
+    infixParselets[{PUNCTUATION, "|"}]  = std::make_shared<ArithmeticOrLogicalExpressionNodeParselet>(21.0, OperationType::OR);
+    infixParselets[{PUNCTUATION, "=="}] = std::make_shared<ComparisonExpressionNodeParselet>(20.0);
+    infixParselets[{PUNCTUATION, "!="}] = std::make_shared<ComparisonExpressionNodeParselet>(20.0);
+    infixParselets[{PUNCTUATION, "&&"}] = std::make_shared<LazyBooleanExpressionParselet>(17.0);
+    infixParselets[{PUNCTUATION, "||"}] = std::make_shared<LazyBooleanExpressionParselet>(16.0);
+    infixParselets[{PUNCTUATION, "="}]  = std::make_shared<AssignmentExpressionParselet>(10.0);
+    infixParselets[{PUNCTUATION, "+="}] = std::make_shared<CompoundAssignmentExpressionParselet>(10.0);
+    infixParselets[{PUNCTUATION, "-="}] = std::make_shared<CompoundAssignmentExpressionParselet>(10.0);
+    infixParselets[{PUNCTUATION, "*="}] = std::make_shared<CompoundAssignmentExpressionParselet>(10.0);
+    infixParselets[{PUNCTUATION, "/="}] = std::make_shared<CompoundAssignmentExpressionParselet>(10.0);
+    infixParselets[{PUNCTUATION, "%="}] = std::make_shared<CompoundAssignmentExpressionParselet>(10.0);
+    infixParselets[{PUNCTUATION, "&="}] = std::make_shared<CompoundAssignmentExpressionParselet>(10.0);
+    infixParselets[{PUNCTUATION, "|="}] = std::make_shared<CompoundAssignmentExpressionParselet>(10.0);
+    infixParselets[{PUNCTUATION, "^="}] = std::make_shared<CompoundAssignmentExpressionParselet>(10.0);
+    infixParselets[{PUNCTUATION, "<<="}] = std::make_shared<CompoundAssignmentExpressionParselet>(10.0);
+    infixParselets[{PUNCTUATION, ">>="}] = std::make_shared<CompoundAssignmentExpressionParselet>(10.0);
+    infixParselets[{PUNCTUATION, "["}] = std::make_shared<IndexExpressionParselet>(30.0);
     infixParselets[{PUNCTUATION, "."}] = std::make_shared<DotExpressionParselet>(40.0);
     infixParselets[{PUNCTUATION, "("}] = std::make_shared<CallExpressionParselet>(50.0);
-    infixParselets[{PUNCTUATION, "<"}]  = std::make_shared<ComparisonExpressionNodeParselet>(7.0);
-    infixParselets[{PUNCTUATION, "<="}] = std::make_shared<ComparisonExpressionNodeParselet>(7.0);
-    infixParselets[{PUNCTUATION, ">"}]  = std::make_shared<ComparisonExpressionNodeParselet>(7.0);
-    infixParselets[{PUNCTUATION, ">="}] = std::make_shared<ComparisonExpressionNodeParselet>(7.0);
-    infixParselets[{PUNCTUATION, "=="}] = std::make_shared<ComparisonExpressionNodeParselet>(6.0);
-    infixParselets[{PUNCTUATION, "!="}] = std::make_shared<ComparisonExpressionNodeParselet>(6.0);
-    infixParselets[{STRICT_KEYWORD, "as"}] = std::make_shared<TypeCastExpressionParselet>(9.0);
-    infixParselets[{PUNCTUATION, "&&"}] = std::make_shared<LazyBooleanExpressionParselet>(4.5);
-    infixParselets[{PUNCTUATION, "||"}] = std::make_shared<LazyBooleanExpressionParselet>(3.5);
   };
 
   //RangePattern → RangeExclusivePattern | RangeInclusivePattern | RangeFromPattern | RangeToExclusivePattern | RangeToInclusivePattern | ObsoleteRangePattern​1
@@ -5859,7 +5869,8 @@ Parser
            dynamic_cast<const LazyBooleanExpressionNode*>(expr) ||
            dynamic_cast<const StructExpressionNode*>(expr) || 
            dynamic_cast<const ArithmeticOrLogicalExpressionNode*>(expr) ||
-           dynamic_cast<const TypeCastExpressionNode*>(expr);
+           dynamic_cast<const TypeCastExpressionNode*>(expr) ||
+           dynamic_cast<const NegationExpressionNode*>(expr);
   }
 
   std::unique_ptr<ExpressionStatement> parser::parseExpressionStatement() {
@@ -6271,10 +6282,12 @@ std::unique_ptr<TypePathFn> parser::ParseTypePathFn() {
       return std::make_unique<ExpressionWithoutBlockNode>(std::unique_ptr<StructExpressionNode>(p), line, column);
     }
     if (auto* p = dynamic_cast<CallExpressionNode*>(raw)) {
+      std::cout << "getting call expression in expression without block" << std::endl;
       left.release();
       return std::make_unique<ExpressionWithoutBlockNode>(std::unique_ptr<CallExpressionNode>(p), line, column);
     }
     if (auto* p = dynamic_cast<MethodCallExpressionNode*>(raw)) {
+      std::cout << "getting methodcall expression in expression without block" << std::endl;
       left.release();
       return std::make_unique<ExpressionWithoutBlockNode>(std::unique_ptr<MethodCallExpressionNode>(p), line, column);
     }
@@ -6309,6 +6322,11 @@ std::unique_ptr<TypePathFn> parser::ParseTypePathFn() {
     if (auto* p = dynamic_cast<TypeCastExpressionNode*>(raw)) {
       left.release();
       return std::make_unique<ExpressionWithoutBlockNode>(std::unique_ptr<TypeCastExpressionNode>(p), line, column);
+    }
+    if (auto* p = dynamic_cast<NegationExpressionNode*>(raw)) {
+      std::cout << "get negation expression in expressionwithoutblock" << std::endl;
+      left.release();
+      return std::make_unique<ExpressionWithoutBlockNode>(std::unique_ptr<NegationExpressionNode>(p), line, column);
     }
 
     throw std::runtime_error("Internal error: parsed expression type not supported by ExpressionWithoutBlockNode");
