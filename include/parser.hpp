@@ -2755,6 +2755,7 @@ class LiteralParselet : public PrefixParselet {
         return std::make_unique<LiteralExpressionNode>(
           std::make_unique<raw_c_string_literal>(token.value), token.line, token.column);
       case INTEGER_LITERAL:
+        std::cout << "getting int_literalexpression with value: " << token.value << std::endl;
         return std::make_unique<LiteralExpressionNode>(
           std::make_unique<integer_literal>(token.value), token.line, token.column);
       case FLOAT_LITERAL:
@@ -3035,6 +3036,7 @@ public:
         elements.push_back(p.parseExpression());
         if (elements.size() == 1) {//判断是tuple还是grouped
           auto delimiter = p.peek();
+          std::cout << "token after the first expression: " << delimiter->value << std::endl;
           if (!delimiter) throw std::runtime_error("Expected ',' or ')' in paren expression");
           if (delimiter->type == TokenType::PUNCTUATION && delimiter->value == ")") {//如果是(Expression)，直接返回
             p.get();
@@ -4126,6 +4128,7 @@ public:
       // check method call
       auto peekTok = p.peek();
       if (peekTok && peekTok->type == TokenType::PUNCTUATION && peekTok->value == "(") {
+        std::cout << "parsing method call expression" << std::endl;
         p.get();
         std::vector<std::unique_ptr<ExpressionNode>> args;
 
@@ -4141,12 +4144,14 @@ public:
 
             if (nextArg->type == TokenType::PUNCTUATION && nextArg->value == ",") {
               p.get();
+              if (p.peek()->value == ")") break;
               continue;
             } else break;
           }
         }
 
         auto closing = p.get();
+        std::cout << "token of closing in parsing method call expression: " << closing->value << std::endl;
         if (!closing.has_value() || closing->type != TokenType::PUNCTUATION || closing->value != ")") {
           throw std::runtime_error("Expected ')' after arguments in method call");
         }
@@ -5320,6 +5325,7 @@ Parser
       throw std::runtime_error("Expected function identifier after 'fn'");
     }
     std::string identifier = id_tok->value;
+    std::cout << "parsing function with id: " << identifier << std::endl;
  
     auto func = std::make_unique<FunctionNode>(fq, identifier, id_tok->line, id_tok->column);
 
@@ -5728,7 +5734,7 @@ Parser
   }
 
   std::unique_ptr<InherentImplNode> parser::ParseInherentImplItem() {
-    std::cout << "parsing inherent implementation node\n";
+    std::cout << "parsing inherent implementation node" << std::endl;
     auto tok = get();
     if (!tok || tok->value != "impl") {
       throw std::runtime_error("Expected 'impl' at beginning of implementation");
@@ -6185,6 +6191,14 @@ std::unique_ptr<TypePathFn> parser::ParseTypePathFn() {
     }
 
     auto left = prefixIt->second->parse(*this, t);
+
+    if (auto* left_expr = dynamic_cast<PredicateLoopExpressionNode*>(left.get())) {
+      return left;
+    }
+
+    if (auto* left_expr = dynamic_cast<IfExpressionNode*>(left.get())) {
+      return left;
+    }
 
     while (true) {
       auto lookahead = peek();

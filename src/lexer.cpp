@@ -120,7 +120,6 @@ void lexer::skip_comment() {
   }
 }
 
-
 void lexer::skip_whitespace() {
   while (pos < input.size()) {
     char c = input[pos];
