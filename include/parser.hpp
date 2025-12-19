@@ -1451,7 +1451,7 @@ class LazyBooleanExpressionNode;
 class ArithmeticOrLogicalExpressionNode;
 class TypeCastExpressionNode;
 class NegationExpressionNode;
-
+class DereferenceExpressionNode;
 
 //ExpressionWithoutBlock → LiteralExpression | PathExpression | OperatorExpression | GroupedExpression | ArrayExpression | AwaitExpression
 //                        | IndexExpression | TupleExpression | TupleIndexingExpression | StructExpression | CallExpression | MethodCallExpression
@@ -1463,7 +1463,7 @@ class ExpressionWithoutBlockNode : public ExpressionNode {
               std::unique_ptr<GroupedExpressionNode>, std::unique_ptr<ArrayExpressionNode>, std::unique_ptr<IndexExpressionNode>, std::unique_ptr<TypeCastExpressionNode>,
               std::unique_ptr<TupleExpressionNode>, std::unique_ptr<TupleIndexingExpressionNode>, std::unique_ptr<StructExpressionNode>, std::unique_ptr<BreakExpressionNode>,
               std::unique_ptr<CallExpressionNode>, std::unique_ptr<MethodCallExpressionNode>, std::unique_ptr<FieldExpressionNode>, std::unique_ptr<ArithmeticOrLogicalExpressionNode>,
-              std::unique_ptr<RangeExpressionNode>, std::unique_ptr<ReturnExpressionNode>, std::unique_ptr<UnderscoreExpressionNode>, std::unique_ptr<LazyBooleanExpressionNode>> expr;
+              std::unique_ptr<RangeExpressionNode>, std::unique_ptr<ReturnExpressionNode>, std::unique_ptr<UnderscoreExpressionNode>, std::unique_ptr<LazyBooleanExpressionNode>, std::unique_ptr<DereferenceExpressionNode>> expr;
 
   template <typename T>
   ExpressionWithoutBlockNode(std::unique_ptr<T> node, int l, int c)
@@ -1486,7 +1486,6 @@ class BlockExpressionNode : public ExpressionNode {
 //OperatorExpression → BorrowExpression | DereferenceExpression | NegationExpression | ArithmeticOrLogicalExpression | ComparisonExpression 
 //                    | LazyBooleanExpression | TypeCastExpression | AssignmentExpression | CompoundAssignmentExpression
 class BorrowExpressionNode;
-class DereferenceExpressionNode;
 class NegationExpressionNode;
 class ArithmeticOrLogicalExpressionNode;
 class ComparisonExpressionNode;
@@ -3738,7 +3737,6 @@ public:
       expr = p.parseExpression(0);
     }
     if (next && next->value == ";") {
-      p.get();
       std::cout << "finish parsing return expression node" << std::endl;
       return std::make_unique<ReturnExpressionNode>(
         nullptr,
@@ -5876,7 +5874,8 @@ Parser
            dynamic_cast<const StructExpressionNode*>(expr) || 
            dynamic_cast<const ArithmeticOrLogicalExpressionNode*>(expr) ||
            dynamic_cast<const TypeCastExpressionNode*>(expr) ||
-           dynamic_cast<const NegationExpressionNode*>(expr);
+           dynamic_cast<const NegationExpressionNode*>(expr) || 
+           dynamic_cast<const DereferenceExpressionNode*>(expr);
   }
 
   std::unique_ptr<ExpressionStatement> parser::parseExpressionStatement() {
@@ -6341,6 +6340,11 @@ std::unique_ptr<TypePathFn> parser::ParseTypePathFn() {
       std::cout << "get negation expression in expressionwithoutblock" << std::endl;
       left.release();
       return std::make_unique<ExpressionWithoutBlockNode>(std::unique_ptr<NegationExpressionNode>(p), line, column);
+    }
+    if (auto* p = dynamic_cast<DereferenceExpressionNode*>(raw)) {
+      std::cout << "get dereference expression in expressionwithoutblock" << std::endl;
+      left.release();
+      return std::make_unique<ExpressionWithoutBlockNode>(std::unique_ptr<DereferenceExpressionNode>(p), line, column);
     }
 
     throw std::runtime_error("Internal error: parsed expression type not supported by ExpressionWithoutBlockNode");
