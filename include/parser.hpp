@@ -1338,6 +1338,7 @@ class integer_literal {
     for (; pos < s.size(); ++pos) {
       char c = s[pos];
       if (c == '_') continue;
+      if (pos == s.size() - 3 && c == 'u' && s[pos + 1] == '3' && s[pos + 2] == '2') break;
       result.push_back(c);
     }
     return result;
@@ -5221,7 +5222,16 @@ Parser
     
     bool has_self = false;
     auto pre_pos = get_pos();
-    if (tok && (tok->value == "self" || tok->value == "&" || tok->value == "mut")) {
+    while (tok->value != ")") {
+      if (tok->value == "self") {
+        has_self = true;
+      }
+      get();
+      tok = peek();
+    }
+    roll_back(pre_pos);
+    tok = peek();
+    if (has_self && tok && (tok->value == "self" || tok->value == "&" || tok->value == "mut")) {
       has_self = true;
       bool if_prefix = false;
       bool if_mut = false;
