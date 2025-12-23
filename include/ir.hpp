@@ -79,6 +79,10 @@ class IRGenerator {
   std::string visit(ExpressionWithoutBlockNode* node);
   std::string visit(OperatorExpressionNode* node);
 
+  std::string visit_in_rhs(ExpressionNode* node);
+  std::string visit_in_rhs(IfExpressionNode* node);
+  std::string visit_in_rhs(ArithmeticOrLogicalExpressionNode* node);
+
   void visit(ItemNode* node);
   void visit(FunctionNode* node);
   void visit(StructStructNode* node);
@@ -293,6 +297,7 @@ std::string IRGenerator::toIRType(TypeNode* type) {
         }
         if (path == "i32") return "i32";
         if (path == "i64") return "i64";
+        if (path == "u32") return "i32";
         if (path == "bool") return "i1";
       }
       break;
@@ -463,8 +468,16 @@ std::string IRGenerator::visit(LiteralExpressionNode* node) {
     if (std::holds_alternative<std::unique_ptr<integer_literal>>(node->literal)) {
       //irStream << "; visiting integer literal: " << value << '\n';
       value = std::get<std::unique_ptr<integer_literal>>(node->literal)->value;
+      try {
+        long long val = std::stoll(value);
+        if (val > 2147483647LL || val < -2147483648LL) {
+          type = "i64";
+        }
+      } catch (...) {
+        // keep i32
+      }
     }
-    irStream << "  %" << temp << " = add i32 0, " << value << "\n";
+    irStream << "  %" << temp << " = add " << type << " 0, " << value << "\n";
     return "%" + temp;
   }
 }
@@ -609,8 +622,9 @@ std::string IRGenerator::visit(CallExpressionNode* node) {
 }
 
 std::string IRGenerator::visit(ArithmeticOrLogicalExpressionNode* node) {
-  //irStream << "; visiting arithmetic or logical expression\n";
+  irStream << "; visiting arithmetic or logical expression\n";
   std::string lhs = visit(node->expression1.get());
+  std::string lhsType = getLhsType(node->expression1.get());
   if (auto* path = dynamic_cast<PathExpressionNode*>(node->expression1.get())) {
     std::string lhs_path = path->toString();
     std::string lhs_type = lookupVarType(lhs_path);
@@ -619,6 +633,12 @@ std::string IRGenerator::visit(ArithmeticOrLogicalExpressionNode* node) {
       std::string lhs_temp = createTemp();
       irStream << "  %" << lhs_temp << " = load i32, i32* %" << lhs_addr << '\n';
       lhs = "%" + lhs_temp;
+      lhsType = "i32";
+    } else if (lhs_type == "i64*") {
+      std::string lhs_temp = createTemp();
+      irStream << "  %" << lhs_temp << " = load i64, i64* %" << lhs_addr << '\n';
+      lhs = "%" + lhs_temp;
+      lhsType = "i64";
     }
   }
   if (auto* type_cast = dynamic_cast<TypeCastExpressionNode*>(node->expression1.get())) {
@@ -630,10 +650,23 @@ std::string IRGenerator::visit(ArithmeticOrLogicalExpressionNode* node) {
         std::string lhs_temp = createTemp();
         irStream << "  %" << lhs_temp << " = load i32, i32* %" << lhs_addr << '\n';
         lhs = "%" + lhs_temp;
+        lhsType = "i32";
+      } else if (lhs_type == "i64*") {
+        std::string lhs_temp = createTemp();
+        irStream << "  %" << lhs_temp << " = load i64, i64* %" << lhs_addr << '\n';
+        lhs = "%" + lhs_temp;
+        lhsType = "i64";
+        if (toIRType(type_cast->type.get()) == "i32") {
+          lhsType = "i32";
+          std::string temp = createTemp();
+          irStream << "  %" << temp << " = trunc i64 " << lhs << " to i32\n";
+          lhs = "%" + temp;
+        }
       }
     }
   }
   std::string rhs = visit(node->expression2.get());
+  std::string rhsType = getLhsType(node->expression2.get());
   if (auto* path = dynamic_cast<PathExpressionNode*>(node->expression2.get())) {
     std::string rhs_path = path->toString();
     std::string rhs_type = lookupVarType(rhs_path);
@@ -642,20 +675,29 @@ std::string IRGenerator::visit(ArithmeticOrLogicalExpressionNode* node) {
       std::string rhs_temp = createTemp();
       irStream << "  %" << rhs_temp << " = load i32, i32* %" << rhs_addr << '\n';
       rhs = "%" + rhs_temp;
+      rhsType = "i32";
+    } else if (rhs_type == "i64*") {
+      std::string rhs_temp = createTemp();
+      irStream << "  %" << rhs_temp << " = load i64, i64* %" << rhs_addr << '\n';
+      rhs = "%" + rhs_temp;
+      rhsType = "i64";
     }
   }
-  if (auto* type_cast = dynamic_cast<TypeCastExpressionNode*>(node->expression2.get())) {
-    if (auto* path = dynamic_cast<PathExpressionNode*>(type_cast->expression.get())) {
-      std::string rhs_path = path->toString();
-      std::string rhs_type = lookupVarType(rhs_path);
-      std::string rhs_addr = lookupSymbol(rhs_path);
-      if (rhs_type == "i32*") {
-        std::string rhs_temp = createTemp();
-        irStream << "  %" << rhs_temp << " = load i32, i32* %" << rhs_addr << '\n';
-        rhs = "%" + rhs_temp;
-      }
+  std::string resultType = (lhsType == "i64" || rhsType == "i64") ? "i64" : "i32";
+  // Convert operands to resultType if necessary
+  if (resultType == "i64") {
+    if (lhsType == "i32") {
+      std::string temp = createTemp();
+      irStream << "  %" << temp << " = sext i32 " << lhs << " to i64\n";
+      lhs = "%" + temp;
+    }
+    if (rhsType == "i32") {
+      std::string temp = createTemp();
+      irStream << "  %" << temp << " = sext i32 " << rhs << " to i64\n";
+      rhs = "%" + temp;
     }
   }
+  irStream << "; lhsType: " << lhsType << ", rhsType: " << rhsType << ", resultType: " << resultType << "\n";
   std::string temp = createTemp();
   std::string op;
   switch (node->type) {
@@ -671,13 +713,14 @@ std::string IRGenerator::visit(ArithmeticOrLogicalExpressionNode* node) {
     case SHR: op = "ashr"; break;
     default: op = "add";
   }
-  irStream << "  %" << temp << " = " << op << " i32 " << lhs << ", " << rhs << "\n";
+  irStream << "  %" << temp << " = " << op << " " << resultType << " " << lhs << ", " << rhs << "\n";
   return "%" + temp;
 }
 
 std::string IRGenerator::visit(ComparisonExpressionNode* node) {
   //irStream << "; visit ComparisonExpressionNode\n";
   std::string lhs = visit(node->expression1.get());
+  std::string lhsType = getLhsType(node->expression1.get());
   if (auto* path = dynamic_cast<PathExpressionNode*>(node->expression1.get())) {
     std::string lhs_path = path->toString();
     //irStream << "; lhs_path in comparison expression: " << lhs_path << "\n";
@@ -687,9 +730,16 @@ std::string IRGenerator::visit(ComparisonExpressionNode* node) {
       std::string lhs_temp = createTemp();
       irStream << "  %" << lhs_temp << " = load i32, i32* %" << lhs_addr << '\n';
       lhs = "%" + lhs_temp;
+      lhsType = "i32";
+    } else if (lhs_type == "i64*") {
+      std::string lhs_temp = createTemp();
+      irStream << "  %" << lhs_temp << " = load i64, i64* %" << lhs_addr << '\n';
+      lhs = "%" + lhs_temp;
+      lhsType = "i64";
     }
   }
   std::string rhs = visit(node->expression2.get());
+  std::string rhsType = getLhsType(node->expression2.get());
   if (auto* path = dynamic_cast<PathExpressionNode*>(node->expression2.get())) {
     std::string rhs_path = path->toString();
     irStream << "; rhs_path in comparison expression: " << rhs_path << "\n";
@@ -699,19 +749,26 @@ std::string IRGenerator::visit(ComparisonExpressionNode* node) {
       std::string rhs_temp = createTemp();
       irStream << "  %" << rhs_temp << " = load i32, i32* %" << rhs_addr << '\n';
       rhs = "%" + rhs_temp;
+      rhsType = "i32";
+    } else if (rhs_type == "i64*") {
+      std::string rhs_temp = createTemp();
+      irStream << "  %" << rhs_temp << " = load i64, i64* %" << rhs_addr << '\n';
+      rhs = "%" + rhs_temp;
+      rhsType = "i64";
     }
   }
-  if (auto* type_cast = dynamic_cast<TypeCastExpressionNode*>(node->expression2.get())) {
-    if (auto* path = dynamic_cast<PathExpressionNode*>(type_cast->expression.get())) {
-      std::string rhs_path = path->toString();
-      irStream << "; rhs_path in comparison expression: " << rhs_path << "\n";
-      std::string rhs_type = lookupVarType(rhs_path);
-      std::string rhs_addr = lookupSymbol(rhs_path);
-      if (rhs_type == "i32*") {
-        std::string rhs_temp = createTemp();
-        irStream << "  %" << rhs_temp << " = load i32, i32* %" << rhs_addr << '\n';
-        rhs = "%" + rhs_temp;
-      }
+  std::string compareType = (lhsType == "i64" || rhsType == "i64") ? "i64" : "i32";
+  // Convert operands to compareType if necessary
+  if (compareType == "i64") {
+    if (lhsType == "i32") {
+      std::string temp = createTemp();
+      irStream << "  %" << temp << " = sext i32 " << lhs << " to i64\n";
+      lhs = "%" + temp;
+    }
+    if (rhsType == "i32") {
+      std::string temp = createTemp();
+      irStream << "  %" << temp << " = sext i32 " << rhs << " to i64\n";
+      rhs = "%" + temp;
     }
   }
   std::string temp = createTemp();
@@ -725,7 +782,7 @@ std::string IRGenerator::visit(ComparisonExpressionNode* node) {
     case LEQ: op = "icmp sle"; break;
     default: op = "icmp eq";
   }
-  irStream << "  %" << temp << " = " << op << " i32 " << lhs << ", " << rhs << "\n";
+  irStream << "  %" << temp << " = " << op << " " << compareType << " " << lhs << ", " << rhs << "\n";
   return "%" + temp;
 }
 
@@ -776,6 +833,12 @@ std::string IRGenerator::visit(AssignmentExpressionNode* node) {
       visit(stmt.get());
     }
     std::string thenValue = ifExpr->block_expression->expression_without_block ? visit(ifExpr->block_expression->expression_without_block.get()) : "";
+    std::string thenType = ifExpr->block_expression->expression_without_block ? getLhsType(ifExpr->block_expression->expression_without_block.get()) : "void";
+    if (lhsType == "i64" && thenType == "i32") {
+      std::string sextTemp = createTemp();
+      irStream << "  %" << sextTemp << " = sext i32 " << thenValue << " to i64\n";
+      thenValue = "%" + sextTemp;
+    }
     irStream << "  store " << expandStructType(lhsType) << " " << thenValue << ", " << expandStructType(lhsType) << "* " << lhsAddr << "\n";
     irStream << "  br label %" << endLabel << "\n";
 
@@ -809,7 +872,7 @@ std::string IRGenerator::visit(AssignmentExpressionNode* node) {
     irStream << endLabel << ":\n";
   } else {
     // 普通 rhs
-    std::string rhsValue = visit(node->expression2.get());
+    std::string rhsValue = visit_in_rhs(node->expression2.get());
     std::string rhsType = getLhsType(node->expression2.get());
     std::string lhsValue = visit(node->expression1.get());
     //irStream << "; lhs value in assignment expression: " << lhsValue << '\n';
@@ -840,16 +903,21 @@ std::string IRGenerator::visit(AssignmentExpressionNode* node) {
       irStream << "  store i32 " << rhsValue << ", i32* " << lhsValue << "\n";
       return "";
     }
-    if (auto* type_cast = dynamic_cast<TypeCastExpressionNode*>(node->expression2.get())) {
-      if (auto* path = dynamic_cast<PathExpressionNode*>(type_cast->expression.get())) {
-        std::string rhsName = path->toString();
-        std::string rhsPathType = getLhsType(path);
-        if (rhsPathType == "i32*" && lhsType == "i32") {
-          std::string rhsTemp = createTemp();
-          irStream << "  %" << rhsTemp << " = load i32, i32* " << rhsValue << "\n";
-          rhsValue = "%" + rhsTemp;
-        }
-      }
+
+    // 类型转换：如果 rhs 是 i64，lhs 是 i32，trunc
+    if (rhsType == "i64" && lhsType == "i32") {
+      std::string truncTemp = createTemp();
+      irStream << "  %" << truncTemp << " = trunc i64 " << rhsValue << " to i32\n";
+      rhsValue = "%" + truncTemp;
+      rhsType = "i32";
+    }
+
+    // 类型转换：如果 lhs 是 i64，rhs 是 i32，sext
+    if (lhsType == "i64" && rhsType == "i32") {
+      std::string sextTemp = createTemp();
+      irStream << "  %" << sextTemp << " = sext i32 " << rhsValue << " to i64\n";
+      rhsValue = "%" + sextTemp;
+      rhsType = "i64";
     }
 
     // 统一使用 lhsValueType 进行 store
@@ -898,30 +966,13 @@ std::string IRGenerator::visit(CompoundAssignmentExpressionNode* node) {
     //irStream << "; rhs name in compoundassignmentexpression: " << rhsName << "\n";
     std::string rhsType = lookupVarType(rhsName);
     std::string rhsTemp = createTemp();
-    //irStream << "; rhs type in compoundassignmentexpression: " << rhsType << "\n";
-    //irStream << "; lhs type in compoundassignmentexpression: " << lhsType << "\n";
+    irStream << "; rhs type in compoundassignmentexpression: " << rhsType << "\n";
+    irStream << "; lhs type in compoundassignmentexpression: " << lhsType << "\n";
     if (isLetDefined(rhsName) && rhsType == lhsType + "*") {
       irStream << "  %" << rhsTemp << " = load " << expandStructType(lhsType)
                << ", " << expandStructType(rhsType) << " " << rhsValue << "\n";
       rhsValue = "%" + rhsTemp;
       rhsType = lhsType;
-    }
-  }
-
-  if (auto* type_cast = dynamic_cast<TypeCastExpressionNode*>(node->expression2.get())) {
-    if (auto* path = dynamic_cast<PathExpressionNode*>(type_cast->expression.get())) {
-      std::string rhsName = path->toString();
-      //irStream << "; rhs name in compoundassignmentexpression: " << rhsName << "\n";
-      std::string rhsType = lookupVarType(rhsName);
-      std::string rhsTemp = createTemp();
-      //irStream << "; rhs type in compoundassignmentexpression: " << rhsType << "\n";
-      //irStream << "; lhs type in compoundassignmentexpression: " << lhsType << "\n";
-      if (isLetDefined(rhsName) && rhsType == lhsType + "*") {
-        irStream << "  %" << rhsTemp << " = load " << expandStructType(lhsType)
-                 << ", " << expandStructType(rhsType) << " " << rhsValue << "\n";
-        rhsValue = "%" + rhsTemp;
-        rhsType = lhsType;
-      }
     }
   }
 
@@ -1237,18 +1288,6 @@ std::string IRGenerator::visit(IndexExpressionNode* node) {
       idxVal = "%" + idx_temp;
     }
   }
-  if (auto* type_cast = dynamic_cast<TypeCastExpressionNode*>(node->index.get())) {
-    if (auto* path = dynamic_cast<PathExpressionNode*>(type_cast->expression.get())) {
-      std::string idx_path = path->toString();
-      std::string idx_type = lookupVarType(idx_path);
-      std::string idx_addr = lookupSymbol(idx_path);
-      if (idx_type == "i32*") {
-        std::string idx_temp = createTemp();
-        irStream << "  %" << idx_temp << " = load i32, i32* %" << idx_addr << '\n';
-        idxVal = "%" + idx_temp;
-      }
-    }
-  }
   std::string ptrTemp = createTemp();
 
   //irStream << "; idxVal: " << idxVal << '\n';
@@ -1353,13 +1392,42 @@ std::string IRGenerator::visit(BreakExpressionNode* node) {
 }
 
 std::string IRGenerator::visit(TypeCastExpressionNode* node) {
+  irStream << "; visiting typecastexpression\n";
   std::string expr = visit(node->expression.get());
   std::string srcType = getLhsType(node->expression.get());
   std::string dstType = toIRType(node->type.get());
+  bool isDstU32 = false;
+  if (auto* typePath = dynamic_cast<TypePathNode*>(node->type.get())) {
+    if (typePath->type_path->toString() == "u32") {
+      isDstU32 = true;
+    }
+  }
   if (srcType == "i1" && dstType == "i32") {
     std::string temp = createTemp();
     irStream << "  %" << temp << " = zext i1 " << expr << " to i32\n";
     return "%" + temp;
+  } else if (srcType == "i32" && dstType == "i32") {
+    if (isDstU32) {
+      std::string temp = createTemp();
+      irStream << "  %" << temp << " = sext i32 " << expr << " to i64\n";
+      return "%" + temp;
+    } else {
+      return expr;
+    }
+  } else if (srcType == "i64" && dstType == "i32") {
+    std::string temp = createTemp();
+    irStream << "  %" << temp << " = trunc i64 " << expr << " to i32\n";
+    return "%" + temp;
+  } else if (srcType == "i64*" && dstType == "i32") {
+    std::string srcTemp = createTemp();
+    irStream << "  %" << srcTemp << " = load i64, i64* " << expr << "\n";
+    std::string temp = createTemp();
+    irStream << "  %" << temp << " = trunc i64 %" << srcTemp << " to i32\n";
+    return "%" + temp;
+  } else if (srcType == "i32*" && (dstType == "i32" || dstType == "usize")) {
+      std::string temp = createTemp();
+      irStream << "  %" << temp << " = load i32, i32* " << expr << "\n";
+      return "%" + temp;
   } else {
     // Other casts not implemented, just return the expression
     return expr;
@@ -1518,7 +1586,7 @@ std::string IRGenerator::visit(BlockExpressionNode* node) {
 std::string IRGenerator::visit(ReturnExpressionNode* node) {
   //irStream << "; visiting return expression\n";
   if (node->expression) {
-    std::string value = visit(node->expression.get());
+    std::string value = visit_in_rhs(node->expression.get());
     if (auto* path = dynamic_cast<PathExpressionNode*>(node->expression.get())) {
       std::string retName = path->toString();
       std::string retType = lookupVarType(retName);
@@ -1527,18 +1595,6 @@ std::string IRGenerator::visit(ReturnExpressionNode* node) {
         irStream << "  %" << retTemp << " = load " << expandStructType(currentRetType)
                << ", " << expandStructType(retType) << " " << value << "\n";
         value = "%" + retTemp;
-      }
-    }
-    if (auto* type_cast = dynamic_cast<TypeCastExpressionNode*>(node->expression.get())) {
-      if (auto* path = dynamic_cast<PathExpressionNode*>(type_cast->expression.get())) {
-        std::string retName = path->toString();
-        std::string retType = lookupVarType(retName);
-        std::string retTemp = createTemp();
-        if (isLetDefined(retName) && retType == currentRetType + "*") {
-          irStream << "  %" << retTemp << " = load " << expandStructType(currentRetType)
-                 << ", " << expandStructType(retType) << " " << value << "\n";
-          value = "%" + retTemp;
-        }
       }
     }
     irStream << "  ret " << currentRetType << " " << value << "\n";
@@ -1759,7 +1815,15 @@ std::string IRGenerator::visit(IfExpressionNode* node) {
     }
     return "";
   } else {
-    return phiValue;
+    if (inFunctionBody) {
+      if (!phiValue.empty()) {
+        irStream << "  store " << expandStructType(currentRetType) << " " << phiValue << ", " << expandStructType(currentRetType) << "* %" << returnVar << "\n";
+        irStream << "  br label %" << returnLabel << "\n";
+      }
+      return "";
+    } else {
+      return phiValue;
+    }
   }
 }
 
@@ -2051,105 +2115,43 @@ void IRGenerator::visit(LetStatement* node) {
   std::string type;
   if (node->type) {
     if (auto* ref = dynamic_cast<ReferenceTypeNode*>(node->type.get())) {
-      type = toIRType(ref->type.get()) + "*";
+      std::string innerType = toIRType(ref->type.get());
+      // check if u32 and overflow
+      if (auto* typePath = dynamic_cast<TypePathNode*>(ref->type.get())) {
+        std::string path = typePath->type_path->toString();
+        if (path == "u32") {
+          innerType = "i64";
+        }
+      }
+      type = innerType + "*";
     } else {
       type = toIRType(node->type.get());
+      if (auto* typePath = dynamic_cast<TypePathNode*>(node->type.get())) {
+        std::string path = typePath->type_path->toString();
+        if (path == "u32") {
+          type = "i64";
+        }
+      }
     }
   } else {
     type = "i32";
   }
   std::string temp = createTemp();
-  //irStream << "; var name in let statement: " << varName << '\n';
-  //irStream << "; var type in let statement: " << type + "*" << '\n';
-  //irStream << "; var address in let statement: " << temp << '\n';
+  irStream << "; var name in let statement: " << varName << '\n';
+  irStream << "; var type in let statement: " << type + "*" << '\n';
+  irStream << "; var address in let statement: " << temp << '\n';
   irStream << "  %" << temp << " = alloca " << expandStructType(type) << "\n";
   if (node->expression) {
     // 检查 rhs 是否是 if expression
-    if (auto* ifExpr = dynamic_cast<IfExpressionNode*>(node->expression.get())) {
-      // 特殊处理 if expression：生成分支并在每个分支中 store
-      //irStream << "; rhs is if expression in let statement, generating branches\n";
-      std::string cond;
-      if (std::holds_alternative<std::unique_ptr<ExpressionNode>>(ifExpr->conditions->condition)) {
-        cond = visit(std::get<std::unique_ptr<ExpressionNode>>(ifExpr->conditions->condition).get());
-        if (auto* path = dynamic_cast<PathExpressionNode*>(std::get<std::unique_ptr<ExpressionNode>>(ifExpr->conditions->condition).get())) {
-          std::string condName = path->toString();
-          std::string condType = lookupVarType(condName);
-          if (condType == "i1*") {
-            std::string condTemp = createTemp();
-            irStream << "  %" << condTemp << " = load i1, i1* " << cond << "\n";
-            cond = "%" + condTemp;
-          }
-        }
-      } else {
-        error("Unsupported condition type in if assignment");
-        return;
-      }
-
-      std::string thenLabel = createLabel();
-      std::string elseLabel = createLabel();
-      std::string endLabel = createLabel();
-
-      irStream << "  br i1 " << cond << ", label %" << thenLabel << ", label %" << elseLabel << "\n";
-
-      irStream << thenLabel << ":\n";
-      irStream << "  ; then branch let assignment\n";
-      // 处理 statements，但不处理 expression_without_block 的 store/br
-      for (auto& stmt : ifExpr->block_expression->statement) {
-        visit(stmt.get());
-      }
-      std::string thenValue = ifExpr->block_expression->expression_without_block ? visit(ifExpr->block_expression->expression_without_block.get()) : "";
-      if (std::holds_alternative<std::unique_ptr<PathExpressionNode>>(ifExpr->block_expression->expression_without_block->expr)) {
-        auto* path = std::get<std::unique_ptr<PathExpressionNode>>(ifExpr->block_expression->expression_without_block->expr).get();
-        std::string thenName = path->toString();
-        if (lookupVarType(thenName) == type + "*") {
-          std::string thenTemp = createTemp();
-          irStream << "  %" << thenTemp << " = load " << expandStructType(type) << ", " << expandStructType(type) << "* " << thenValue << "\n";
-          thenValue = "%" + thenTemp;
-        }
-      }
-      irStream << "  store " << expandStructType(type) << " " << thenValue << ", " << expandStructType(type) << "* %" << temp << "\n";
-      irStream << "  br label %" << endLabel << "\n";
-
-      irStream << elseLabel << ":\n";
-      irStream << "  ; else branch let assignment\n";
-      std::string elseValue;
-      if (ifExpr->else_block) {
-        // 类似处理 else_block
-        for (auto& stmt : ifExpr->else_block->statement) {
-          visit(stmt.get());
-        }
-        elseValue = ifExpr->else_block->expression_without_block ? visit(ifExpr->else_block->expression_without_block.get()) : "";
-        if (std::holds_alternative<std::unique_ptr<PathExpressionNode>>(ifExpr->else_block->expression_without_block->expr)) {
-          auto* path = std::get<std::unique_ptr<PathExpressionNode>>(ifExpr->else_block->expression_without_block->expr).get();
-          std::string elseName = path->toString();
-          if (lookupVarType(elseName) == type + "*") {
-            std::string elseTemp = createTemp();
-            irStream << "  %" << elseTemp << " = load " << expandStructType(type) << ", " << expandStructType(type) << "* " << elseValue << "\n";
-            elseValue = "%" + elseTemp;
-          }
-        }
-      } else if (ifExpr->else_if) {
-        // 如果是 else_if，递归处理，但简化假设是 IfExpressionNode
-        if (auto* elseIf = dynamic_cast<IfExpressionNode*>(ifExpr->else_if.get())) {
-          // 类似处理
-          for (auto& stmt : elseIf->block_expression->statement) {
-            visit(stmt.get());
-          }
-          elseValue = elseIf->block_expression->expression_without_block ? visit(elseIf->block_expression->expression_without_block.get()) : "";
-        } else {
-          elseValue = visit(ifExpr->else_if.get());
-        }
-      } else {
-        error("If expression in let must have else");
-        return;
-      }
-      irStream << "  store " << expandStructType(type) << " " << elseValue << ", " << expandStructType(type) << "* %" << temp << "\n";
-      irStream << "  br label %" << endLabel << "\n";
-
-      irStream << endLabel << ":\n";
-    } else {
       // 普通 rhs
-      std::string value = visit(node->expression.get());
+      std::string value = visit_in_rhs(node->expression.get());
+      std::string rhsType = getLhsType(node->expression.get());
+      if (type == "i64" && rhsType == "i32") {
+        rhsType = "i64";
+        std::string rhsTemp = createTemp();
+        irStream << "  %" << rhsTemp << " = sext i32 " << value << " to i64\n";
+        value = "%" + rhsTemp;
+      }
       if (auto* path = dynamic_cast<PathExpressionNode*>(node->expression.get())) {
         std::string letName = path->toString();
         std::string letType = lookupVarType(letName);
@@ -2161,7 +2163,6 @@ void IRGenerator::visit(LetStatement* node) {
       }
       irStream << "  store " << expandStructType(type) << " " << value << ", " << expandStructType(type) << "* %" << temp << "\n";
     }
-  }
   // 更新 scopes 在计算 value 之后
   symbolScopes.back()[varName] = temp;
   varTypeScopes.back()[varName] = type + "*";
@@ -2538,19 +2539,6 @@ std::string IRGenerator::getLhsAddress(ExpressionNode* lhs) {
         idxVal = "%" + idx_temp;
       }
     }
-
-    if (auto* type_cast = dynamic_cast<TypeCastExpressionNode*>(index->index.get())) {
-      if (auto* path = dynamic_cast<PathExpressionNode*>(type_cast->expression.get())) {
-        std::string idx_path = path->toString();
-        std::string idx_type = lookupVarType(idx_path);
-        std::string idx_addr = lookupSymbol(idx_path);
-        if (idx_type == "i32*") {
-          std::string idx_temp = createTemp();
-          irStream << "  %" << idx_temp << " = load i32, i32* %" << idx_addr << '\n';
-          idxVal = "%" + idx_temp;
-        }
-      }
-    }
     
     if (baseType.size() > 2 && baseType[0] == '[' && baseType.back() != '*') {
       irStream << "  %" << temp << " = getelementptr " << expandStructType(baseType) << ", " << expandStructType(baseType) << "* " << baseAddr << ", i32 0, i32 " << idxVal << "\n";
@@ -2618,9 +2606,21 @@ std::string IRGenerator::getLhsType(ExpressionNode* lhs) {
     if (std::holds_alternative<std::unique_ptr<bool>>(lit->literal)) {
       return "i1";
     } else {
+      // check if large number
+      if (std::holds_alternative<std::unique_ptr<integer_literal>>(lit->literal)) {
+        std::string value = std::get<std::unique_ptr<integer_literal>>(lit->literal)->value;
+        try {
+          long long val = std::stoll(value);
+          if (val > 2147483647LL || val < -2147483648LL) {
+            return "i64";
+          }
+        } catch (...) {
+        }
+      }
       return "i32";
     }
   } else if (auto* group = dynamic_cast<GroupedExpressionNode*>(lhs)) {
+    //irStream << "; getting type of grouped expression\n";
     return getLhsType(group->expression.get());
   } else if (auto* path = dynamic_cast<PathExpressionNode*>(lhs)) {
     std::string name = path->toString();
@@ -2637,6 +2637,21 @@ std::string IRGenerator::getLhsType(ExpressionNode* lhs) {
       std::string lhsType = lookupVarType(name);
       //irStream << "; result of getLhsType of PathExpression: " << lhsType << '\n';
       return lhsType;
+    }
+  } else if (auto* cast = dynamic_cast<TypeCastExpressionNode*>(lhs)) {
+    std::string dstType = toIRType(cast->type.get());
+    bool isDstU32 = false;
+    if (auto* typePath = dynamic_cast<TypePathNode*>(cast->type.get())) {
+      if (typePath->type_path->toString() == "u32") {
+        isDstU32 = true;
+      }
+    }
+    if (isDstU32) {
+      irStream << "; type of typecastexpression: i64\n";
+      return "i64";
+    } else {
+      irStream << "; type of typecastexpression: " << dstType << '\n';
+      return dstType;
     }
   } else if (auto* opExpr = dynamic_cast<OperatorExpressionNode*>(lhs)) {
     // 让类型推导与 visit(OperatorExpressionNode*) 保持一致
@@ -2658,7 +2673,11 @@ std::string IRGenerator::getLhsType(ExpressionNode* lhs) {
       }
     }, opExpr->operator_expression);
   } else if (dynamic_cast<ArithmeticOrLogicalExpressionNode*>(lhs)) {
-    return "i32";
+    //irStream << "; getting type of arithmetic expr\n";
+    std::string lhsType = getLhsType(static_cast<ArithmeticOrLogicalExpressionNode*>(lhs)->expression1.get());
+    std::string rhsType = getLhsType(static_cast<ArithmeticOrLogicalExpressionNode*>(lhs)->expression2.get());
+    //irStream << "; lhsType: " << lhsType << ", rhsType: " << rhsType << ", resultType: " << ((lhsType == "i64" || rhsType == "i64") ? "i64" : "i32") << '\n';
+    return (lhsType == "i64" || rhsType == "i64" || lhsType == "i64*" || rhsType == "i64*") ? "i64" : "i32";
   } else if (dynamic_cast<ComparisonExpressionNode*>(lhs)) {
     return "i1";
   } else if (dynamic_cast<LazyBooleanExpressionNode*>(lhs)) {
@@ -2787,6 +2806,16 @@ std::string IRGenerator::getLhsType(ExpressionNode* lhs) {
     std::string retType = functionTable[funcName];
     if (retType.empty()) retType = "i32";
     return retType;
+  } else if (auto* ifExpr = dynamic_cast<IfExpressionNode*>(lhs)) {
+    if (ifExpr->block_expression && ifExpr->block_expression->expression_without_block) {
+      return getLhsType(ifExpr->block_expression->expression_without_block.get());
+    } else {
+      return "void";
+    }
+  } else if (auto* exprWithoutBlock = dynamic_cast<ExpressionWithoutBlockNode*>(lhs)) {
+    return std::visit([&](auto&& arg) -> std::string {
+      return getLhsType(arg.get());
+    }, exprWithoutBlock->expr);
   } else if (auto* methodCall = dynamic_cast<MethodCallExpressionNode*>(lhs)) {
     std::string methodName;
     if (std::holds_alternative<Identifier>(methodCall->path_expr_segment)) {
@@ -3030,6 +3059,233 @@ bool IRGenerator::isLetDefined(const std::string& name) {
     }
   }
   return false;
+}
+
+std::string IRGenerator::visit_in_rhs(ExpressionNode* node) {
+  if (auto* arith = dynamic_cast<ArithmeticOrLogicalExpressionNode*>(node)) {
+    return visit_in_rhs(arith);
+  } else if (auto* ifExpr = dynamic_cast<IfExpressionNode*>(node)) {
+    return visit_in_rhs(ifExpr);
+  } else {
+    return visit(node);
+  }
+}
+
+std::string IRGenerator::visit_in_rhs(ArithmeticOrLogicalExpressionNode* node) {
+  irStream << "; visiting arithmetic or logical expression in let\n";
+  std::string lhs = visit_in_rhs(static_cast<ExpressionNode*>(node->expression1.get()));
+  std::string lhsType = getLhsType(node->expression1.get());
+  if (auto* path = dynamic_cast<PathExpressionNode*>(node->expression1.get())) {
+    std::string lhs_path = path->toString();
+    std::string lhs_type = lookupVarType(lhs_path);
+    std::string lhs_addr = lookupSymbol(lhs_path);
+    if (lhs_type == "i32*") {
+      std::string lhs_temp = createTemp();
+      irStream << "  %" << lhs_temp << " = load i32, i32* %" << lhs_addr << '\n';
+      lhs = "%" + lhs_temp;
+      lhsType = "i32";
+    } else if (lhs_type == "i64*") {
+      std::string lhs_temp = createTemp();
+      irStream << "  %" << lhs_temp << " = load i64, i64* %" << lhs_addr << '\n';
+      lhs = "%" + lhs_temp;
+      lhsType = "i64";
+    }
+  }
+  if (auto* type_cast = dynamic_cast<TypeCastExpressionNode*>(node->expression1.get())) {
+    if (auto* path = dynamic_cast<PathExpressionNode*>(type_cast->expression.get())) {
+      std::string lhs_path = path->toString();
+      std::string lhs_type = lookupVarType(lhs_path);
+      std::string lhs_addr = lookupSymbol(lhs_path);
+      if (lhs_type == "i32*") {
+        std::string lhs_temp = createTemp();
+        irStream << "  %" << lhs_temp << " = load i32, i32* %" << lhs_addr << '\n';
+        lhs = "%" + lhs_temp;
+        lhsType = "i32";
+      } else if (lhs_type == "i64*") {
+        std::string lhs_temp = createTemp();
+        irStream << "  %" << lhs_temp << " = load i64, i64* %" << lhs_addr << '\n';
+        lhs = "%" + lhs_temp;
+        lhsType = "i64";
+        if (toIRType(type_cast->type.get()) == "i32") {
+          lhsType = "i32";
+          std::string temp = createTemp();
+          irStream << "  %" << temp << " = trunc i64 " << lhs << " to i32\n";
+          lhs = "%" + temp;
+        }
+      }
+    }
+  }
+  std::string rhs = visit_in_rhs(static_cast<ExpressionNode*>(node->expression2.get()));
+  std::string rhsType = getLhsType(node->expression2.get());
+  if (auto* path = dynamic_cast<PathExpressionNode*>(node->expression2.get())) {
+    std::string rhs_path = path->toString();
+    std::string rhs_type = lookupVarType(rhs_path);
+    std::string rhs_addr = lookupSymbol(rhs_path);
+    if (rhs_type == "i32*") {
+      std::string rhs_temp = createTemp();
+      irStream << "  %" << rhs_temp << " = load i32, i32* %" << rhs_addr << '\n';
+      rhs = "%" + rhs_temp;
+      rhsType = "i32";
+    } else if (rhs_type == "i64*") {
+      std::string rhs_temp = createTemp();
+      irStream << "  %" << rhs_temp << " = load i64, i64* %" << rhs_addr << '\n';
+      rhs = "%" + rhs_temp;
+      rhsType = "i64";
+    }
+  }
+  if (auto* type_cast = dynamic_cast<TypeCastExpressionNode*>(node->expression2.get())) {
+    if (auto* path = dynamic_cast<PathExpressionNode*>(type_cast->expression.get())) {
+      std::string rhs_path = path->toString();
+      std::string rhs_type = lookupVarType(rhs_path);
+      std::string rhs_addr = lookupSymbol(rhs_path);
+      if (rhs_type == "i32*") {
+        std::string rhs_temp = createTemp();
+        irStream << "  %" << rhs_temp << " = load i32, i32* %" << rhs_addr << '\n';
+        rhs = "%" + rhs_temp;
+        rhsType = "i32";
+      } else if (rhs_type == "i64*") {
+        std::string rhs_temp = createTemp();
+        irStream << "  %" << rhs_temp << " = load i64, i64* %" << rhs_addr << '\n';
+        rhs = "%" + rhs_temp;
+        rhsType = "i64";
+      }
+    }
+  }
+  std::string resultType = (lhsType == "i64" || rhsType == "i64") ? "i64" : "i32";
+  // Convert operands to resultType if necessary
+  if (resultType == "i64") {
+    if (lhsType == "i32") {
+      std::string temp = createTemp();
+      irStream << "  %" << temp << " = sext i32 " << lhs << " to i64\n";
+      lhs = "%" + temp;
+    }
+    if (rhsType == "i32") {
+      std::string temp = createTemp();
+      irStream << "  %" << temp << " = sext i32 " << rhs << " to i64\n";
+      rhs = "%" + temp;
+    }
+  }
+  irStream << "; lhsType: " << lhsType << ", rhsType: " << rhsType << ", resultType: " << resultType << "\n";
+  std::string temp = createTemp();
+  std::string op;
+  switch (node->type) {
+    case ADD: op = "add"; break;
+    case MINUS: op = "sub"; break;
+    case MUL: op = "mul"; break;
+    case DIV: op = "sdiv"; break;
+    case MOD: op = "srem"; break;
+    case AND: op = "and"; break;
+    case OR: op = "or"; break;
+    case XOR: op = "xor"; break;
+    case SHL: op = "shl"; break;
+    case SHR: op = "ashr"; break;
+    default: op = "add";
+  }
+  irStream << "  %" << temp << " = " << op << " " << resultType << " " << lhs << ", " << rhs << "\n";
+  return "%" + temp;
+}
+
+std::string IRGenerator::visit_in_rhs(IfExpressionNode* node) {
+  irStream << "; visiting if expression in rhs\n";
+  std::string cond;
+  if (std::holds_alternative<std::unique_ptr<ExpressionNode>>(node->conditions->condition)) {
+    cond = visit(std::get<std::unique_ptr<ExpressionNode>>(node->conditions->condition).get());
+    if (auto* path = dynamic_cast<PathExpressionNode*>(std::get<std::unique_ptr<ExpressionNode>>(node->conditions->condition).get())) {
+      std::string condName = path->toString();
+      std::string condType = lookupVarType(condName);
+      if (condType == "i1*") {
+        std::string condTemp = createTemp();
+        irStream << "  %" << condTemp << " = load i1, i1* " << cond << "\n";
+        cond = "%" + condTemp;
+      }
+    }
+  } else {
+    error("Unsupported condition type in if assignment");
+    return "";
+  }
+
+  std::string thenLabel = createLabel();
+  std::string elseLabel = createLabel();
+  std::string endLabel = createLabel();
+
+  // 不使用 phi：用一个临时栈槽在分支内 store，endLabel 处 load。
+  // 结果类型尽量从 if 表达式自身推断（getLhsType(IfExpressionNode*)）。
+  std::string resultType = getLhsType(static_cast<ExpressionNode*>(node));
+  if (resultType.empty() || resultType == "void" || resultType == "i32*") resultType = "i32";
+  std::string resultPtr = createTemp();
+  irStream << "  %" << resultPtr << " = alloca " << expandStructType(resultType) << "\n";
+
+  irStream << "  br i1 " << cond << ", label %" << thenLabel << ", label %" << elseLabel << "\n";
+
+  irStream << thenLabel << ":\n";
+  irStream << "  ; then branch let assignment\n";
+  // 处理 statements，但不处理 expression_without_block 的 store/br
+  for (auto& stmt : node->block_expression->statement) {
+    visit(stmt.get());
+  }
+  std::string thenValue = node->block_expression->expression_without_block ? visit(node->block_expression->expression_without_block.get()) : "";
+  std::string thenType = node->block_expression->expression_without_block ? getLhsType(node->block_expression->expression_without_block.get()) : resultType;
+  // i32/i64 对齐（最常见的数值分支对齐需求）
+  irStream << "; thenType: " << thenType << ", resultType: " << resultType << "\n";
+  if (resultType == "i64" && thenType == "i32") {
+    std::string t = createTemp();
+    irStream << "  %" << t << " = sext i32 " << thenValue << " to i64\n";
+    thenValue = "%" + t;
+  } else if (resultType == "i32" && thenType == "i64") {
+    std::string t = createTemp();
+    irStream << "  %" << t << " = trunc i64 " << thenValue << " to i32\n";
+    thenValue = "%" + t;
+  } else if (resultType == "i32" && thenType == "i32*") {
+    std::string t = createTemp();
+    irStream << "  %" << t << " = load i32, i32* " << thenValue << "\n";
+    thenValue = "%" + t;
+  }
+  irStream << "  store " << expandStructType(resultType) << " " << thenValue
+           << ", " << expandStructType(resultType) << "* %" << resultPtr << "\n";
+  irStream << "  br label %" << endLabel << "\n";
+
+  irStream << elseLabel << ":\n";
+  irStream << "  ; else branch let assignment\n";
+  std::string elseValue;
+  std::string elseType = resultType;
+  if (node->else_block) {
+    // 类似处理 else_block
+    for (auto& stmt : node->else_block->statement) {
+      visit(stmt.get());
+    }
+    elseValue = node->else_block->expression_without_block ? visit(node->else_block->expression_without_block.get()) : "";
+    elseType = node->else_block->expression_without_block ? getLhsType(node->else_block->expression_without_block.get()) : resultType;
+  } else if (node->else_if) {
+    // 注意：@/RCompiler-FAQ/include/parser.hpp 中 IfExpressionNode::else_if 可能继续挂着 IfExpressionNode（else if 链）。
+    // 这里递归使用 visit_in_rhs 覆盖整条链，但最终仍然在本层用 store/load 汇总结果（无 phi）。
+    elseValue = visit_in_rhs(node->else_if.get());
+    elseType = getLhsType(node->else_if.get());
+  } else {
+    error("If expression in let must have else");
+    return "";
+  }
+  if (resultType == "i64" && elseType == "i32") {
+    std::string t = createTemp();
+    irStream << "  %" << t << " = sext i32 " << elseValue << " to i64\n";
+    elseValue = "%" + t;
+  } else if (resultType == "i32" && elseType == "i64") {
+    std::string t = createTemp();
+    irStream << "  %" << t << " = trunc i64 " << elseValue << " to i32\n";
+    elseValue = "%" + t;
+  } else if (resultType == "i32" && elseType == "i32*") {
+    std::string t = createTemp();
+    irStream << "  %" << t << " = load i32, i32* " << elseValue << "\n";
+    elseValue = "%" + t;
+  }
+  irStream << "  store " << expandStructType(resultType) << " " << elseValue
+           << ", " << expandStructType(resultType) << "* %" << resultPtr << "\n";
+  irStream << "  br label %" << endLabel << "\n";
+
+  irStream << endLabel << ":\n";
+  std::string loaded = createTemp();
+  irStream << "  %" << loaded << " = load " << expandStructType(resultType)
+           << ", " << expandStructType(resultType) << "* %" << resultPtr << "\n";
+  return "%" + loaded;
 }
 
 #endif
