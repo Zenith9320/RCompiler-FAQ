@@ -95,6 +95,7 @@ class IRGenerator {
    std::string currentBreakLabel;
 
   void preScan(const std::vector<std::unique_ptr<ASTNode>>& ast);
+  void preScanFunctionBody(BlockExpressionNode* block);
   void generateStructTypes();
 
   std::string toIRType(TypeNode* type);
@@ -109,6 +110,8 @@ class IRGenerator {
   std::string visit(MethodCallExpressionNode* node);
   std::string visit(IndexExpressionNode* node);
   std::string visit(ArrayExpressionNode* node);
+  bool isConstantZero(ExpressionNode* expr);
+  int getTypeSize(const std::string& type);
   std::string visit(ArithmeticOrLogicalExpressionNode* node);
   std::string visit(ComparisonExpressionNode* node);
   std::string visit(LazyBooleanExpressionNode* node);
@@ -120,6 +123,7 @@ class IRGenerator {
   std::string visit(NegationExpressionNode* node);
   std::string visit(BorrowExpressionNode* node);
   std::string visit(BlockExpressionNode* node);
+  std::string visit_in_main(BlockExpressionNode* node);
   std::string visit(IfExpressionNode* node);
   std::string visit(PredicateLoopExpressionNode* node);
   std::string visit(ReturnExpressionNode* node);
@@ -134,6 +138,7 @@ class IRGenerator {
   std::string visit_in_rhs(IfExpressionNode* node);
   std::string visit_in_rhs(ArithmeticOrLogicalExpressionNode* node);
   std::string visit_in_rhs(GroupedExpressionNode* node);
+  std::string visit_in_rhs(StatementNode* node);
 
   void visit(ItemNode* node);
   void visit(FunctionNode* node);
@@ -162,6 +167,7 @@ class IRGenerator {
   bool isLetDefined(const std::string& name);
 
   std::optional<int> evaluateConstant(ExpressionNode* expr);
+  std::optional<int> computeConstantValue(ArithmeticOrLogicalExpressionNode* node);
   std::string getElementType(const std::string& typeStr);
 
   bool hasReturn(BlockExpressionNode* block);
@@ -318,7 +324,8 @@ std::string IRGenerator::generate(const std::vector<std::unique_ptr<ASTNode>>& a
   irStream << "declare i8* @malloc(i32 noundef)\n";
   irStream << "declare i8* @memset(i8* noundef, i32 noundef, i32 noundef)\n";
   irStream << "declare i8* @memcpy(i8* noundef, i8* noundef, i32 noundef)\n";
-  irStream << "declare void @exit(i32 noundef)\n\n";
+  irStream << "declare void @exit(i32 noundef)\n";
+  irStream << "declare void @llvm.memset.p0i8.i32(i8*, i8, i32, i1)\n\n";
 
   // 第三步：生成其他代码（函数等）
   for (const auto& node : ast) {
@@ -360,7 +367,7 @@ std::string IRGenerator::toIRType(TypeNode* type) {
       //irStream << "; the type is reference type\n";
       auto* refType = dynamic_cast<ReferenceTypeNode*>(type);
       if (refType) {
-        return "ptr";
+        return toIRType(refType->type.get()) + "*";
       }
       break;
     }
@@ -518,20 +525,32 @@ std::string IRGenerator::visit(LiteralExpressionNode* node) {
     // 整数或其他
     std::string temp = createTemp();
     std::string type = "i32";
-    std::string value = node->toString();
+    std::string value_str;
     if (std::holds_alternative<std::unique_ptr<integer_literal>>(node->literal)) {
-      //irStream << "; visiting integer literal: " << value << '\n';
-      value = std::get<std::unique_ptr<integer_literal>>(node->literal)->value;
+      auto& int_lit = std::get<std::unique_ptr<integer_literal>>(node->literal);
+      //irStream << "; visiting integer literal: " << int_lit->raw << '\n';
       try {
-        long long val = std::stoll(value);
+        long long val = std::stoll(int_lit->value, nullptr, int_lit->base);
         if (val > 2147483647LL || val < -2147483648LL) {
           type = "i64";
         }
       } catch (...) {
         // keep i32
       }
+      if (int_lit->base == 16) {
+        value_str = "0x" + int_lit->value;
+      } else if (int_lit->base == 8) {
+        value_str = "0o" + int_lit->value;
+      } else if (int_lit->base == 2) {
+        value_str = "0b" + int_lit->value;
+      } else {
+        value_str = int_lit->value;
+      }
+      value_str = std::to_string(std::stoll(int_lit->value, nullptr, int_lit->base));
+    } else {
+      value_str = node->toString();
     }
-    irStream << "  %" << temp << " = add " << type << " 0, " << value << "\n";
+    irStream << "  %" << temp << " = add " << type << " 0, " << value_str << "\n";
     return "%" + temp;
   }
 }
@@ -541,6 +560,7 @@ std::string IRGenerator::visit(PathExpressionNode* node) {
     irStream << "; visiting pathexpression with path: " << name << '\n';
     if (constantTable.find(name) != constantTable.end()) {
       // 常量，直接返回值
+      irStream << "; constant found: " << name << " = " << constantTable[name] << '\n';
       return constantTable[name];
     } else {
       std::string temp = lookupSymbol(name);
@@ -659,7 +679,7 @@ std::string IRGenerator::visit(CallExpressionNode* node) {
             }
         } else {
             // 默认 i32
-            //irStream << "; function not found in paramTypesTable\n";
+            irStream << "; function: " << funcName << " not found in paramTypesTable\n";
             for (size_t i = 0; i < node->call_params->expressions.size(); ++i) {
                 if (i > 0) args += ", ";
                 std::string argValue = visit_in_rhs(node->call_params->expressions[i].get());
@@ -770,6 +790,15 @@ std::string IRGenerator::visit(ArithmeticOrLogicalExpressionNode* node) {
     case SHL: op = "shl"; break;
     case SHR: op = "ashr"; break;
     default: op = "add";
+  }
+  if (op == "shl" || op == "ashr") {
+    if (resultType == "i64" && lhsType == "i32") {
+      irStream << "; need modifying in shl or ashr" << '\n';
+      resultType = "i32";
+      std::string modTemp = createTemp();
+      irStream << "  %" << modTemp << " = trunc i64 " << rhs << " to i32\n";
+      rhs = "%" + modTemp;
+    }
   }
   irStream << "  %" << temp << " = " << op << " " << resultType << " " << lhs << ", " << rhs << "\n";
   return "%" + temp;
@@ -912,6 +941,11 @@ std::string IRGenerator::visit(AssignmentExpressionNode* node) {
       irStream << "  %" << sextTemp << " = sext i32 " << thenValue << " to i64\n";
       thenValue = "%" + sextTemp;
     }
+    if (thenType == "i32*") {
+      std::string loadTemp = createTemp();
+      irStream << "  %" << loadTemp << " = load i32, i32* " << thenValue << "\n";
+      thenValue = "%" + loadTemp;
+    }
     irStream << "  store " << expandStructType(lhsType) << " " << thenValue << ", " << expandStructType(lhsType) << "* " << lhsAddr << "\n";
     irStream << "  br label %" << endLabel << "\n";
 
@@ -1040,7 +1074,7 @@ std::string IRGenerator::visit(CompoundAssignmentExpressionNode* node) {
   }
 
   // 获取 rhs 值
-  std::string rhsValue = visit(node->expression2.get());
+  std::string rhsValue = visit_in_rhs(node->expression2.get());
   if (auto* path = dynamic_cast<PathExpressionNode*>(node->expression2.get())) {
     std::string rhsName = path->toString();
     //irStream << "; rhs name in compoundassignmentexpression: " << rhsName << "\n";
@@ -1091,7 +1125,7 @@ std::string IRGenerator::visit(CompoundAssignmentExpressionNode* node) {
 }
 
 std::string IRGenerator::visit(StructExpressionNode* node) {
-  //irStream << "; visiting struct expression\n";
+  irStream << "; visiting struct expression\n";
   std::string structName = node->pathin_expression->toString();
   auto it = structFields.find(structName);
   if (it == structFields.end()) {
@@ -1133,6 +1167,15 @@ std::string IRGenerator::visit(StructExpressionNode* node) {
       }
       std::string fieldValue = visit(field->expression.get());
       std::string temp = createTemp();
+      if (auto* path = dynamic_cast<PathExpressionNode*>(field->expression.get())) {
+        std::string varName = path->toString();
+        std::string varType = lookupVarType(varName);
+        if (expandStructType(varType) == expandStructType(it->second[index].second) + "*") {
+          std::string varTemp = createTemp();
+          irStream << "  %" << varTemp << " = load " << expandStructType(it->second[index].second) << ", " << expandStructType(varType) << " " << fieldValue << "\n";
+          fieldValue = "%" + varTemp;
+        }
+      }
       irStream << "  %" << temp << " = insertvalue " << expandStructType(structType) << " " << currentValue << ", " << expandStructType(it->second[index].second) << " " << fieldValue << ", " << index << "\n";
       currentValue = "%" + temp;
     }
@@ -1455,6 +1498,7 @@ std::string IRGenerator::visit(IndexExpressionNode* node) {
 
 
 std::string IRGenerator::visit(PredicateLoopExpressionNode* node) {
+  //irStream << "; visiting predicate loop expression\n";
   std::string loopLabel = createLabel();
   std::string bodyLabel = createLabel();
   std::string endLabel = createLabel();
@@ -1471,6 +1515,13 @@ std::string IRGenerator::visit(PredicateLoopExpressionNode* node) {
       std::string varName = stmt->let_statement->pattern->toString();
       std::string type = stmt->let_statement->type ? toIRType(stmt->let_statement->type.get()) : "i32";
       std::string allocTemp = createTemp();
+      if (stmt->let_statement->type->node_type == TypeType::TypePath_node) {
+        auto* typePathNode = dynamic_cast<TypePathNode*>(stmt->let_statement->type.get());
+        if (typePathNode && typePathNode->type_path) {
+          std::string path = typePathNode->type_path->toString();
+          if (path == "u32") type = "i64";
+        }
+      }
       irStream << "  %" << allocTemp << " = alloca " << expandStructType(type) << "\n";
       loopPreAlloc[varName] = allocTemp;
     }
@@ -1481,13 +1532,28 @@ std::string IRGenerator::visit(PredicateLoopExpressionNode* node) {
   std::string cond;
   if (std::holds_alternative<std::unique_ptr<ExpressionNode>>(node->conditions->condition)) {
     cond = visit(std::get<std::unique_ptr<ExpressionNode>>(node->conditions->condition).get());
+    //irStream << "; condition expression type: " << typeid(*std::get<std::unique_ptr<ExpressionNode>>(node->conditions->condition).get()).name() << "\n"; 
     if (auto* path = dynamic_cast<PathExpressionNode*>(std::get<std::unique_ptr<ExpressionNode>>(node->conditions->condition).get())) {
       std::string condName = path->toString();
+      //irStream << "; condName: " << condName << "\n";
       std::string condType = lookupVarType(condName);
+      //irStream << "; condType: " << condType << "\n";
       if (condType == "i1*") {
         std::string condTemp = createTemp();
         irStream << "  %" << condTemp << " = load i1, i1* " << cond << "\n";
         cond = "%" + condTemp;
+      }
+    } else if (auto* group = dynamic_cast<GroupedExpressionNode*>(std::get<std::unique_ptr<ExpressionNode>>(node->conditions->condition).get())) {
+      if (auto* path = dynamic_cast<PathExpressionNode*>(group->expression.get())) {
+        std::string condName = path->toString();
+        //irStream << "; condName: " << condName << "\n";
+        std::string condType = lookupVarType(condName);
+        //irStream << "; condType: " << condType << "\n";
+        if (condType == "i1*") {
+          std::string condTemp = createTemp();
+          irStream << "  %" << condTemp << " = load i1, i1* " << cond << "\n";
+          cond = "%" + condTemp;
+        }
       }
     }
   } else {
@@ -1534,9 +1600,11 @@ std::string IRGenerator::visit(TypeCastExpressionNode* node) {
   bool isDstU32 = false;
   if (auto* typePath = dynamic_cast<TypePathNode*>(node->type.get())) {
     if (typePath->type_path->toString() == "u32") {
+      irStream << "; typecast to u32\n";
       isDstU32 = true;
     }
   }
+  irStream << "; srcType: " << srcType << ", dstType: " << dstType << "\n";
   if (srcType == "i1" && dstType == "i32") {
     std::string temp = createTemp();
     irStream << "  %" << temp << " = zext i1 " << expr << " to i32\n";
@@ -1545,6 +1613,7 @@ std::string IRGenerator::visit(TypeCastExpressionNode* node) {
     if (isDstU32) {
       std::string temp = createTemp();
       irStream << "  %" << temp << " = sext i32 " << expr << " to i64\n";
+      irStream << "; result of type cast expression: " << "%" << temp << "\n";
       return "%" + temp;
     } else {
       return expr;
@@ -1562,6 +1631,11 @@ std::string IRGenerator::visit(TypeCastExpressionNode* node) {
   } else if (srcType == "i32*" && (dstType == "i32" || dstType == "usize")) {
       std::string temp = createTemp();
       irStream << "  %" << temp << " = load i32, i32* " << expr << "\n";
+      if (isDstU32) {
+        std::string temp2 = createTemp();
+        irStream << "  %" << temp2 << " = sext i32 %" << temp << " to i64\n";
+        return "%" + temp2;
+      }
       return "%" + temp;
   } else {
     // Other casts not implemented, just return the expression
@@ -1601,31 +1675,52 @@ std::string IRGenerator::visit(ArrayExpressionNode* node) {
   // Store elements
   if (node->type == ArrayExpressionType::REPEAT) {
     std::string value = visit(node->expressions[0].get());
-    // Generate loop for repeat initialization
-    std::string loopVar = createTemp();
-    std::string loopLabel = createLabel();
-    std::string bodyLabel = createLabel();
-    std::string endLabel = createLabel();
-    irStream << "  %" << loopVar << " = alloca i32\n";
-    irStream << "  store i32 0, i32* %" << loopVar << "\n";
-    irStream << "  br label %" << loopLabel << "\n";
-    irStream << loopLabel << ":\n";
-    std::string iv = createTemp();
-    irStream << "  %" << iv << " = load i32, i32* %" << loopVar << "\n";
-    std::string cond = createTemp();
-    irStream << "  %" << cond << " = icmp slt i32 %" << iv << ", " << size << "\n";
-    irStream << "  br i1 %" << cond << ", label %" << bodyLabel << ", label %" << endLabel << "\n";
-    irStream << bodyLabel << ":\n";
-    std::string elemPtr = createTemp();
-    irStream << "  %" << elemPtr << " = getelementptr " << arrayType << ", " << arrayType << "* %" << arrPtr
-             << ", i32 0, i32 %" << iv << "\n";
-    irStream << "  store " << expandStructType(elementType) << " " << value
-             << ", " << expandStructType(elementType) << "* %" << elemPtr << "\n";
-    std::string ivNext = createTemp();
-    irStream << "  %" << ivNext << " = add i32 %" << iv << ", 1\n";
-    irStream << "  store i32 %" << ivNext << ", i32* %" << loopVar << "\n";
-    irStream << "  br label %" << loopLabel << "\n";
-    irStream << endLabel << ":\n";
+    if (isConstantZero(node->expressions[0].get())) {
+      // use memset for zero initialization
+      int elemSizeInt = getTypeSize(elementType);
+      int totalSize = size * elemSizeInt;
+      std::string byteLength = std::to_string(totalSize);
+      std::string ptrTemp = createTemp();
+      irStream << "  %" << ptrTemp << " = bitcast " << arrayType << "* %" << arrPtr << " to i8*\n";
+      irStream << "  call void @llvm.memset.p0i8.i32(i8* %" << ptrTemp << ", i8 0, i32 " << byteLength << ", i1 false)\n";
+    } else {
+      // Use memcpy for repeating values
+      std::string valuePtr = createTemp();
+      irStream << "  %" << valuePtr << " = alloca " << expandStructType(elementType) << "\n";
+      irStream << "  store " << expandStructType(elementType) << " " << value << ", " << expandStructType(elementType) << "* %" << valuePtr << "\n";
+
+      std::string elemSize = std::to_string(getTypeSize(elementType));
+
+      // Generate loop with memcpy
+      std::string loopVar = createTemp();
+      std::string loopLabel = createLabel();
+      std::string bodyLabel = createLabel();
+      std::string endLabel = createLabel();
+      irStream << "  %" << loopVar << " = alloca i32\n";
+      irStream << "  store i32 0, i32* %" << loopVar << "\n";
+      irStream << "  br label %" << loopLabel << "\n";
+      irStream << loopLabel << ":\n";
+      std::string iv = createTemp();
+      irStream << "  %" << iv << " = load i32, i32* %" << loopVar << "\n";
+      std::string cond = createTemp();
+      irStream << "  %" << cond << " = icmp slt i32 %" << iv << ", " << size << "\n";
+      irStream << "  br i1 %" << cond << ", label %" << bodyLabel << ", label %" << endLabel << "\n";
+      irStream << bodyLabel << ":\n";
+      std::string elemPtr = createTemp();
+      irStream << "  %" << elemPtr << " = getelementptr " << arrayType << ", " << arrayType << "* %" << arrPtr
+               << ", i32 0, i32 %" << iv << "\n";
+      std::string srcCast = createTemp();
+      irStream << "  %" << srcCast << " = bitcast " << expandStructType(elementType) << "* %" << valuePtr << " to i8*\n";
+      std::string dstCast = createTemp();
+      irStream << "  %" << dstCast << " = bitcast " << expandStructType(elementType) << "* %" << elemPtr << " to i8*\n";
+      std::string memcpyTemp = createTemp();
+      irStream << "  %" << memcpyTemp << " = call i8* @builtin_memcpy(i8* %" << dstCast << ", i8* %" << srcCast << ", i32 " << elemSize << ")\n";
+      std::string ivNext = createTemp();
+      irStream << "  %" << ivNext << " = add i32 %" << iv << ", 1\n";
+      irStream << "  store i32 %" << ivNext << ", i32* %" << loopVar << "\n";
+      irStream << "  br label %" << loopLabel << "\n";
+      irStream << endLabel << ":\n";
+    }
   } else {
     for (int i = 0; i < size; ++i) {
       std::string value = visit(node->expressions[i].get());
@@ -1741,16 +1836,17 @@ std::string IRGenerator::visit(BlockExpressionNode* node) {
   if (node->expression_without_block) {
     irStream << "; visiting expression without block in block expression\n";
     if (inFunctionBody) {
-      //irStream << "; visiting expression without block in block expression in func body\n";
+      irStream << "; visiting expression without block in block expression in func body\n";
       std::string value = visit(node->expression_without_block.get());
       if (auto* p = std::get_if<std::unique_ptr<PathExpressionNode>>(&node->expression_without_block->expr)) {
         PathExpressionNode* path = p->get();
-        //irStream << "; visiting path expression in block expression\n";
+        irStream << "; visiting path expression in block expression\n";
         std::string retName = path->toString();
-        //irStream << "; retName: " << retName << "\n";
+        irStream << "; retName: " << retName << "\n";
+        irStream << "; currentRetType: " << currentRetType << "\n";
         std::string retType = lookupVarType(retName);
         std::string retTemp = createTemp();
-        if (isLetDefined(retName) && retType == currentRetType + "*") {
+        if (isLetDefined(retName) && expandStructType(retType) == expandStructType(currentRetType) + "*") {
           irStream << "  %" << retTemp << " = load " << expandStructType(currentRetType)
                  << ", " << expandStructType(retType) << " " << value << "\n";
           value = "%" + retTemp;
@@ -1767,6 +1863,45 @@ std::string IRGenerator::visit(BlockExpressionNode* node) {
   exitScope();
   return result;
 }
+
+std::string IRGenerator::visit_in_main(BlockExpressionNode* node) {
+  //irStream << "; visiting block expression\n";
+  enterScope();
+  for (const auto& stmt : node->statement) {
+    if (!(stmt->item && dynamic_cast<FunctionNode*>(stmt->item.get()))) visit(stmt.get());
+  }
+  std::string result = "";
+  if (node->expression_without_block) {
+    irStream << "; visiting expression without block in block expression\n";
+    if (inFunctionBody) {
+      irStream << "; visiting expression without block in block expression in func body\n";
+      std::string value = visit(node->expression_without_block.get());
+      if (auto* p = std::get_if<std::unique_ptr<PathExpressionNode>>(&node->expression_without_block->expr)) {
+        PathExpressionNode* path = p->get();
+        irStream << "; visiting path expression in block expression\n";
+        std::string retName = path->toString();
+        irStream << "; retName: " << retName << "\n";
+        irStream << "; currentRetType: " << currentRetType << "\n";
+        std::string retType = lookupVarType(retName);
+        std::string retTemp = createTemp();
+        if (isLetDefined(retName) && expandStructType(retType) == expandStructType(currentRetType) + "*") {
+          irStream << "  %" << retTemp << " = load " << expandStructType(currentRetType)
+                 << ", " << expandStructType(retType) << " " << value << "\n";
+          value = "%" + retTemp;
+        }
+      }
+      if (!std::holds_alternative<std::unique_ptr<ReturnExpressionNode>>(node->expression_without_block->expr)) {
+        irStream << "  store " << expandStructType(currentRetType) << " " << value << ", " << expandStructType(currentRetType) << "* %" << returnVar << "\n";
+        irStream << "  br label %" << returnLabel << "\n";
+      }
+    } else {
+      result = visit(node->expression_without_block.get());
+    }
+  }
+  exitScope();
+  return result;
+}
+
 
 std::string IRGenerator::visit(ReturnExpressionNode* node) {
   irStream << "; visiting return expression\n";
@@ -1841,6 +1976,8 @@ std::string IRGenerator::visit(ExpressionWithoutBlockNode* node) {
     } else if constexpr (std::is_same_v<T, std::unique_ptr<ReturnExpressionNode>>) {
       return visit(arg.get());
     } else if constexpr (std::is_same_v<T, std::unique_ptr<UnderscoreExpressionNode>>) {
+      return visit(arg.get());
+    } else if constexpr (std::is_same_v<T, std::unique_ptr<ComparisonExpressionNode>>) {
       return visit(arg.get());
     } else {
       error("Unsupported ExpressionWithoutBlock type");
@@ -2036,7 +2173,10 @@ void IRGenerator::visit(ItemNode* node) {
 void IRGenerator::visit(FunctionNode* node) {
   std::string funcName = node->identifier;
   std::string retType = node->return_type ? expandStructType(toIRType(node->return_type->type.get())) : "void";
-  if (funcName == "main") retType = "i32";
+  if (funcName == "main") {
+    retType = "i32";
+    preScanFunctionBody(node->block_expression.get());
+  }
   currentRetType = retType;
 
     // 函数签名
@@ -2207,8 +2347,10 @@ void IRGenerator::visit(FunctionNode* node) {
 
     //irStream << "; finish processing param\n";
     inFunctionBody = true;
-    if (node->block_expression) {
+    if (node->block_expression && funcName != "main") {
         visit(node->block_expression.get());  // 生成代码，包括 store 和 br
+    } if (node->block_expression && funcName == "main") {
+      visit_in_main(node->block_expression.get());
     }
     inFunctionBody = false;
     exitScope();
@@ -2264,7 +2406,19 @@ void IRGenerator::visit(ConstantItemNode* node) {
     std::string value;
     if (auto* lit = dynamic_cast<LiteralExpressionNode*>(node->expression.get())) {
       value = lit->toString();
+    } else if (auto* neg = dynamic_cast<NegationExpressionNode*>(node->expression.get())) {
+      if (auto* lit = dynamic_cast<LiteralExpressionNode*>(neg->expression.get())) {
+        value = "-" + lit->toString();
+      }
+    } else if (auto* arith = dynamic_cast<ArithmeticOrLogicalExpressionNode*>(node->expression.get())) {
+      auto constVal = computeConstantValue(arith);
+      if (constVal) {
+        value = std::to_string(*constVal);
+      } else {
+        error("Constant expression cannot be evaluated");
+      }
     }
+    irStream << "; constant : " << *node->identifier << " = " << value << "\n";
     constantTable[*node->identifier] = value;
   }
 }
@@ -2311,6 +2465,7 @@ void IRGenerator::visit(LetStatement* node) {
   std::string typeNameStr;
   if (node->type) {
     typeNameStr = node->type->toString();
+    irStream << "; type name in let statement: " << typeNameStr << '\n';
     if (auto* ref = dynamic_cast<ReferenceTypeNode*>(node->type.get())) {
       std::string innerType = toIRType(ref->type.get());
       // check if u32 and overflow
@@ -2346,27 +2501,27 @@ void IRGenerator::visit(LetStatement* node) {
     irStream << "  %" << temp << " = alloca " << expandStructType(type) << "\n";
   }
   if (node->expression) {
-    // 检查 rhs 是否是 if expression
-      // 普通 rhs
-      std::string value = visit_in_rhs(node->expression.get());
-      std::string rhsType = getLhsType(node->expression.get());
-      if (type == "i64" && rhsType == "i32") {
-        rhsType = "i64";
-        std::string rhsTemp = createTemp();
-        irStream << "  %" << rhsTemp << " = sext i32 " << value << " to i64\n";
-        value = "%" + rhsTemp;
-      }
-      if (auto* path = dynamic_cast<PathExpressionNode*>(node->expression.get())) {
-        std::string letName = path->toString();
-        std::string letType = lookupVarType(letName);
-        if (letType == type + "*") {
-          std::string letTemp = createTemp();
-          irStream << "  %" << letTemp << " = load " << type << ", " << type << "* " << value << '\n';
-          value = "%" + letTemp;
-        }
-      }
-      irStream << "  store " << expandStructType(type) << " " << value << ", " << expandStructType(type) << "* %" << temp << "\n";
+  // 检查 rhs 是否是 if expression
+    // 普通 rhs
+    std::string value = visit_in_rhs(node->expression.get());
+    std::string rhsType = getLhsType(node->expression.get());
+    if (type == "i64" && rhsType == "i32") {
+      rhsType = "i64";
+      std::string rhsTemp = createTemp();
+      irStream << "  %" << rhsTemp << " = sext i32 " << value << " to i64\n";
+      value = "%" + rhsTemp;
     }
+    if (auto* path = dynamic_cast<PathExpressionNode*>(node->expression.get())) {
+      std::string letName = path->toString();
+      std::string letType = lookupVarType(letName);
+      if (letType == type + "*") {
+        std::string letTemp = createTemp();
+        irStream << "  %" << letTemp << " = load " << type << ", " << type << "* " << value << '\n';
+        value = "%" + letTemp;
+      }
+    }
+    irStream << "  store " << expandStructType(type) << " " << value << ", " << expandStructType(type) << "* %" << temp << "\n";
+  }
   // 更新 scopes 在计算 value 之后
   symbolScopes.back()[varName] = temp;
   varTypeScopes.back()[varName] = type + "*";
@@ -2493,6 +2648,75 @@ void IRGenerator::preScan(const std::vector<std::unique_ptr<ASTNode>>& ast) {
         //irStream << "; func name: " << func->identifier << '\n';
         for (size_t i = 0; i < paramTypesTable[func->identifier].size(); i++) {
           //irStream << "; the "<< i << "th param: " << paramTypesTable[func->identifier][i] << '\n';
+        }
+        if (func->identifier == "main") {
+          for (auto& stmt : func->block_expression->statement) {
+            if (stmt->item) {
+              if (auto* func1 = dynamic_cast<FunctionNode*>(stmt->item.get())) {
+                // 记录函数原型
+                std::string retType = func1->return_type ? toIRType(func1->return_type->type.get()) : "void";
+                if (func1->identifier == "main") retType = "i32";
+                //irStream << "; return type of function: " << func->identifier << " : " << retType << '\n';
+                functionTable[func1->identifier] = retType;
+                // 记录参数类型
+                std::vector<std::string> paramTypes;
+                if (func1->function_parameter) {
+                  if (func1->function_parameter->self_param) {
+                    //irStream << "; having self in function: " << func1->identifier << "\n";
+                    std::string selfType;
+                    if (func1->impl_type_name) {
+                      if (std::holds_alternative<std::unique_ptr<ShorthandSelf>>(func1->function_parameter->self_param->self)) {
+                        auto& ss = std::get<std::unique_ptr<ShorthandSelf>>(func1->function_parameter->self_param->self);
+                        if (ss->if_prefix) {
+                          selfType = "%" + *func1->impl_type_name + "*";
+                        } else {
+                          selfType = "%" + *func1->impl_type_name;
+                        }
+                      } else {
+                        auto& ts = std::get<std::unique_ptr<TypedSelf>>(func1->function_parameter->self_param->self);
+                        if (auto* ref = dynamic_cast<ReferenceTypeNode*>(ts->type.get())) {
+                          selfType = toIRType(ref->type.get()) + "*";
+                        } else {
+                          selfType = toIRType(ts->type.get());
+                        }
+                        if (ts->if_mut) {
+                          selfType += "*";
+                        }
+                      }
+                    } else {
+                      selfType = "i8*";
+                    }
+                    paramTypes.push_back(selfType);
+                  }
+                  for (size_t i = 0; i < func1->function_parameter->function_params.size(); ++i) {
+                    const auto& param = func1->function_parameter->function_params[i];
+                    std::string paramType;
+                    if (std::holds_alternative<std::unique_ptr<FunctionParamPattern>>(param->info)) {
+                      const auto& fpp = std::get<std::unique_ptr<FunctionParamPattern>>(param->info);
+                      if (fpp->type) {
+                        if (auto* ref = dynamic_cast<ReferenceTypeNode*>(fpp->type.get())) {
+                          paramType = toIRType(ref->type.get()) + "*";
+                        } else {
+                          paramType = toIRType(fpp->type.get());
+                        }
+                      } else {
+                        paramType = "i32";
+                      }
+                    } else if (std::holds_alternative<std::unique_ptr<TypeNode>>(param->info)) {
+                      const auto& typeNode = std::get<std::unique_ptr<TypeNode>>(param->info);
+                      if (auto* ref = dynamic_cast<ReferenceTypeNode*>(typeNode.get())) {
+                        paramType = toIRType(ref->type.get()) + "*";
+                      } else {
+                        paramType = toIRType(typeNode.get());
+                      }
+                    }
+                    paramTypes.push_back(paramType);
+                  }
+                }
+                paramTypesTable[func1->identifier] = paramTypes;
+              }
+            }
+          }
         }
       } else if (auto* impl = dynamic_cast<InherentImplNode*>(item)) {
         // 处理 impl 中的函数
@@ -2733,6 +2957,11 @@ std::string IRGenerator::getLhsAddress(ExpressionNode* lhs) {
       return "";
     }
     std::string fieldPtr = createTemp();
+    if (baseType == "%" + structName + "**") {
+      std::string temp = createTemp();
+      irStream << "  %" << temp << " = load " << expandStructType("%" + structName) << "*, " << expandStructType("%" + structName) << "** " << baseAddr << "\n";
+      baseAddr = "%" + temp;
+    }
     irStream << "  %" << fieldPtr << " = getelementptr " << expandStructType("%" + structName) << ", " << expandStructType("%" + structName) << "* " << baseAddr << ", i32 0, i32 " << index << "\n";
     return "%" + fieldPtr;
   } else if (auto* index = dynamic_cast<IndexExpressionNode*>(lhs)) {
@@ -2894,6 +3123,7 @@ std::string IRGenerator::getLhsType(ExpressionNode* lhs) {
     std::string lhsType = getLhsType(static_cast<ArithmeticOrLogicalExpressionNode*>(lhs)->expression1.get());
     std::string rhsType = getLhsType(static_cast<ArithmeticOrLogicalExpressionNode*>(lhs)->expression2.get());
     irStream << "; lhsType: " << lhsType << ", rhsType: " << rhsType << ", resultType: " << ((lhsType == "i64" || rhsType == "i64") ? "i64" : "i32") << '\n';
+    if (static_cast<ArithmeticOrLogicalExpressionNode*>(lhs)->type == OperationType::SHL || static_cast<ArithmeticOrLogicalExpressionNode*>(lhs)->type == OperationType::SHR) return "i32";
     return (lhsType == "i64" || rhsType == "i64" || lhsType == "i64*" || rhsType == "i64*") ? "i64" : "i32";
   } else if (dynamic_cast<ComparisonExpressionNode*>(lhs)) {
     return "i1";
@@ -3183,7 +3413,8 @@ std::string IRGenerator::getLhsTypeWithStar(ExpressionNode* lhs) {
 std::optional<int> IRGenerator::evaluateConstant(ExpressionNode* expr) {
   if (auto* lit = dynamic_cast<LiteralExpressionNode*>(expr)) {
     if (std::holds_alternative<std::unique_ptr<integer_literal>>(lit->literal)) {
-      return std::stoi(std::get<std::unique_ptr<integer_literal>>(lit->literal)->value);
+      auto& int_lit = std::get<std::unique_ptr<integer_literal>>(lit->literal);
+      return std::stoll(int_lit->value, nullptr, int_lit->base);
     }
   } else if (auto* path = dynamic_cast<PathExpressionNode*>(expr)) {
     std::string name = path->toString();
@@ -3205,9 +3436,27 @@ std::optional<int> IRGenerator::evaluateConstant(ExpressionNode* expr) {
         default: break;
       }
     }
+  } else if (auto* grouped = dynamic_cast<GroupedExpressionNode*>(expr)) {
+    return evaluateConstant(grouped->expression.get());
   } else {
     irStream << "Unknow type of expression in evaluating constant" << typeid(*expr).name() << '\n';
     error(std::string("Unknow type of expression in evaluating constant") + typeid(*expr).name());
+  }
+  return std::nullopt;
+}
+
+std::optional<int> IRGenerator::computeConstantValue(ArithmeticOrLogicalExpressionNode* node) {
+  auto lhs = evaluateConstant(node->expression1.get());
+  auto rhs = evaluateConstant(node->expression2.get());
+  if (lhs && rhs) {
+    switch (node->type) {
+      case ADD: return *lhs + *rhs;
+      case MINUS: return *lhs - *rhs;
+      case MUL: return *lhs * *rhs;
+      case DIV: return *lhs / *rhs;
+      case MOD: return *lhs % *rhs;
+      default: break;
+    }
   }
   return std::nullopt;
 }
@@ -3349,6 +3598,8 @@ std::string IRGenerator::visit_in_rhs(ArithmeticOrLogicalExpressionNode* node) {
       }
     }
   }
+  irStream << "; ---lhs address: " << lhs << '\n';
+  irStream << "; ---lhs type: " << lhsType << '\n';
   std::string rhs = visit_in_rhs(static_cast<ExpressionNode*>(node->expression2.get()));
   std::string rhsType = getLhsType(node->expression2.get());
   if (auto* path = dynamic_cast<PathExpressionNode*>(node->expression2.get())) {
@@ -3385,21 +3636,12 @@ std::string IRGenerator::visit_in_rhs(ArithmeticOrLogicalExpressionNode* node) {
       }
     }
   }
+  irStream << "; ---rhs address: " << rhs << '\n';
+  irStream << "; ---rhs type: " << rhsType << '\n';
   std::string resultType = (lhsType == "i64" || rhsType == "i64") ? "i64" : "i32";
   // Convert operands to resultType if necessary
-  if (resultType == "i64") {
-    if (lhsType == "i32") {
-      std::string temp = createTemp();
-      irStream << "  %" << temp << " = sext i32 " << lhs << " to i64\n";
-      lhs = "%" + temp;
-    }
-    if (rhsType == "i32") {
-      std::string temp = createTemp();
-      irStream << "  %" << temp << " = sext i32 " << rhs << " to i64\n";
-      rhs = "%" + temp;
-    }
-  }
-  irStream << "; lhsType: " << lhsType << ", rhsType: " << rhsType << ", resultType: " << resultType << "\n";
+  //irStream << "; lhsType: " << lhsType << ", rhsType: " << rhsType << ", resultType: " << resultType << "\n";
+  //irStream << "; lhs address: " << lhs << ", rhs address: " << rhs << '\n';
   std::string temp = createTemp();
   std::string op;
   switch (node->type) {
@@ -3414,6 +3656,27 @@ std::string IRGenerator::visit_in_rhs(ArithmeticOrLogicalExpressionNode* node) {
     case SHL: op = "shl"; break;
     case SHR: op = "ashr"; break;
     default: op = "add";
+  }
+  if (resultType == "i64" && !(op == "shl" || op == "ashr")) {
+    if (lhsType == "i32") {
+      std::string temp = createTemp();
+      irStream << "  %" << temp << " = sext i32 " << lhs << " to i64\n";
+      lhs = "%" + temp;
+    }
+    if (rhsType == "i32") {
+      std::string temp = createTemp();
+      irStream << "  %" << temp << " = sext i32 " << rhs << " to i64\n";
+      rhs = "%" + temp;
+    }
+  }
+  if (op == "shl" || op == "ashr") {
+    if (resultType == "i64" && lhsType == "i32") {
+      irStream << "; need modifying in shl or ashr" << '\n';
+      resultType = "i32";
+      std::string modTemp = createTemp();
+      irStream << "  %" << modTemp << " = trunc i64 " << rhs << " to i32\n";
+      rhs = "%" + modTemp;
+    }
   }
   irStream << "  %" << temp << " = " << op << " " << resultType << " " << lhs << ", " << rhs << "\n";
   return "%" + temp;
@@ -3469,10 +3732,12 @@ std::string IRGenerator::visit_in_rhs(IfExpressionNode* node) {
   irStream << thenLabel << ":\n";
   irStream << "  ; then branch let assignment\n";
   // 处理 statements，但不处理 expression_without_block 的 store/br
+  std::string pos_stat_ret;
   for (auto& stmt : node->block_expression->statement) {
-    visit(stmt.get());
+    if (pos_stat_ret == "") pos_stat_ret = visit_in_rhs(stmt.get());
   }
   std::string thenValue = node->block_expression->expression_without_block ? visit(node->block_expression->expression_without_block.get()) : "";
+  if (thenValue == "") thenValue = pos_stat_ret;
   std::string thenType = node->block_expression->expression_without_block ? getLhsType(node->block_expression->expression_without_block.get()) : resultType;
   // i32/i64 对齐（最常见的数值分支对齐需求）
   irStream << "; thenType: " << thenType << ", resultType: " << resultType << "\n";
@@ -3484,7 +3749,7 @@ std::string IRGenerator::visit_in_rhs(IfExpressionNode* node) {
     std::string t = createTemp();
     irStream << "  %" << t << " = trunc i64 " << thenValue << " to i32\n";
     thenValue = "%" + t;
-  } else if (resultType == "i32" && thenType == "i32*") {
+  } else if (thenType == "i32*") {
     std::string t = createTemp();
     irStream << "  %" << t << " = load i32, i32* " << thenValue << "\n";
     thenValue = "%" + t;
@@ -3499,10 +3764,12 @@ std::string IRGenerator::visit_in_rhs(IfExpressionNode* node) {
   std::string elseType = resultType;
   if (node->else_block) {
     // 类似处理 else_block
+    std::string pos_else_ret;
     for (auto& stmt : node->else_block->statement) {
-      visit(stmt.get());
+      if (pos_else_ret == "") pos_else_ret = visit_in_rhs(stmt.get());
     }
     elseValue = node->else_block->expression_without_block ? visit(node->else_block->expression_without_block.get()) : "";
+    if (elseValue == "") elseValue = pos_else_ret;
     elseType = node->else_block->expression_without_block ? getLhsType(node->else_block->expression_without_block.get()) : resultType;
   } else if (node->else_if) {
     // 注意：@/RCompiler-FAQ/include/parser.hpp 中 IfExpressionNode::else_if 可能继续挂着 IfExpressionNode（else if 链）。
@@ -3521,7 +3788,7 @@ std::string IRGenerator::visit_in_rhs(IfExpressionNode* node) {
     std::string t = createTemp();
     irStream << "  %" << t << " = trunc i64 " << elseValue << " to i32\n";
     elseValue = "%" + t;
-  } else if (resultType == "i32" && elseType == "i32*") {
+  } else if (elseType == "i32*") {
     std::string t = createTemp();
     irStream << "  %" << t << " = load i32, i32* " << elseValue << "\n";
     elseValue = "%" + t;
@@ -3538,7 +3805,67 @@ std::string IRGenerator::visit_in_rhs(IfExpressionNode* node) {
 }
 
 std::string IRGenerator::visit_in_rhs(GroupedExpressionNode* node) {
-  return visit_in_rhs(node->expression.get());
+   return visit_in_rhs(node->expression.get());
 }
 
+bool IRGenerator::isConstantZero(ExpressionNode* expr) {
+  if (auto* lit = dynamic_cast<LiteralExpressionNode*>(expr)) {
+    if (std::holds_alternative<std::unique_ptr<integer_literal>>(lit->literal)) {
+      auto& int_lit = std::get<std::unique_ptr<integer_literal>>(lit->literal);
+      return int_lit->value == "0";
+    }
+  }
+  return false;
+}
+
+int IRGenerator::getTypeSize(const std::string& type) {
+  if (type == "i32") return 4;
+  if (type == "i64") return 8;
+  if (type == "i1") return 1;
+  if (type[0] == '%') {
+    std::string name = type.substr(1);
+    auto it = structFields.find(name);
+    if (it != structFields.end()) {
+      int total = 0;
+      for (auto& f : it->second) {
+        std::string fieldType = f.second;
+        total += getTypeSize(fieldType);
+      }
+      return total;
+    }
+  } else if (type[0] == '[') {
+    // array [N x T]
+    size_t xPos = type.find(" x ");
+    if (xPos != std::string::npos) {
+      std::string nStr = type.substr(1, xPos - 1);
+      std::string tStr = type.substr(xPos + 3, type.size() - xPos - 4); // remove ]
+      int n = std::stoi(nStr);
+      int elemSize = getTypeSize(tStr);
+      return n * elemSize;
+    }
+  } else if (type.back() == '*') {
+    // pointer, assume 8 bytes
+    return 8;
+  }
+  return 4; // default
+}
+
+std::string IRGenerator::visit_in_rhs(StatementNode* node) {
+  if (node->expr_statement) {
+    return visit_in_rhs(node->expr_statement->expression.get());
+  } else {
+    visit(node);
+    return "";
+  }
+}
+
+void IRGenerator::preScanFunctionBody(BlockExpressionNode* node) {
+  for (auto& stmt : node->statement) {
+    if (stmt->item) {
+      if (auto* func = dynamic_cast<FunctionNode*>(stmt->item.get())) {
+        visit(func);
+      }
+    }
+  }
+}
 #endif

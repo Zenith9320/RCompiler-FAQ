@@ -1453,6 +1453,7 @@ class ArithmeticOrLogicalExpressionNode;
 class TypeCastExpressionNode;
 class NegationExpressionNode;
 class DereferenceExpressionNode;
+class ComparisonExpressionNode;
 
 //ExpressionWithoutBlock → LiteralExpression | PathExpression | OperatorExpression | GroupedExpression | ArrayExpression | AwaitExpression
 //                        | IndexExpression | TupleExpression | TupleIndexingExpression | StructExpression | CallExpression | MethodCallExpression
@@ -1463,7 +1464,7 @@ class ExpressionWithoutBlockNode : public ExpressionNode {
   std::variant<std::unique_ptr<LiteralExpressionNode>, std::unique_ptr<PathExpressionNode>, std::unique_ptr<OperatorExpressionNode>, std::unique_ptr<NegationExpressionNode>,
               std::unique_ptr<GroupedExpressionNode>, std::unique_ptr<ArrayExpressionNode>, std::unique_ptr<IndexExpressionNode>, std::unique_ptr<TypeCastExpressionNode>,
               std::unique_ptr<TupleExpressionNode>, std::unique_ptr<TupleIndexingExpressionNode>, std::unique_ptr<StructExpressionNode>, std::unique_ptr<BreakExpressionNode>,
-              std::unique_ptr<CallExpressionNode>, std::unique_ptr<MethodCallExpressionNode>, std::unique_ptr<FieldExpressionNode>, std::unique_ptr<ArithmeticOrLogicalExpressionNode>,
+              std::unique_ptr<CallExpressionNode>, std::unique_ptr<MethodCallExpressionNode>, std::unique_ptr<FieldExpressionNode>, std::unique_ptr<ArithmeticOrLogicalExpressionNode>, std::unique_ptr<ComparisonExpressionNode>, 
               std::unique_ptr<RangeExpressionNode>, std::unique_ptr<ReturnExpressionNode>, std::unique_ptr<UnderscoreExpressionNode>, std::unique_ptr<LazyBooleanExpressionNode>, std::unique_ptr<DereferenceExpressionNode>> expr;
 
   template <typename T>
@@ -5885,7 +5886,8 @@ Parser
            dynamic_cast<const ArithmeticOrLogicalExpressionNode*>(expr) ||
            dynamic_cast<const TypeCastExpressionNode*>(expr) ||
            dynamic_cast<const NegationExpressionNode*>(expr) || 
-           dynamic_cast<const DereferenceExpressionNode*>(expr);
+           dynamic_cast<const DereferenceExpressionNode*>(expr) ||
+           dynamic_cast<const ComparisonExpressionNode*>(expr);
   }
 
   std::unique_ptr<ExpressionStatement> parser::parseExpressionStatement() {
@@ -6275,6 +6277,10 @@ std::unique_ptr<TypePathFn> parser::ParseTypePathFn() {
     if (auto* p = dynamic_cast<PathExpressionNode*>(raw)) {
       left.release();
       return std::make_unique<ExpressionWithoutBlockNode>(std::unique_ptr<PathExpressionNode>(p), line, column);
+    }
+    if (auto* p = dynamic_cast<ComparisonExpressionNode*>(raw)) {
+      left.release();
+      return std::make_unique<ExpressionWithoutBlockNode>(std::unique_ptr<ComparisonExpressionNode>(p), line, column);
     }
     if (auto* p = dynamic_cast<OperatorExpressionNode*>(raw)) {
       left.release();
