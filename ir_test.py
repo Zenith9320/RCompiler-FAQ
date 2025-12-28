@@ -91,13 +91,15 @@ def main():
 
     passed = 0
     total = 0
+    total_test_time = 0.0
 
     for i in range(1, 51):
         folder = f"comprehensive{i}"
         folder_path = os.path.join(src_dir, folder)
         if not os.path.exists(folder_path):
             continue
-
+    
+        start_time = time.time()
         rx_file = None
         in_file = None
         out_file = None
@@ -110,7 +112,9 @@ def main():
                 out_file = os.path.join(folder_path, f)
 
         if not rx_file or not in_file or not out_file:
-            print(f"\033[91m[FAIL] {folder}: Missing files\033[0m")
+            elapsed = time.time() - start_time
+            total_test_time += elapsed
+            print(f"\033[91m[FAIL] {folder}: Missing files ({elapsed:.2f}s)\033[0m")
             total += 1
             continue
 
@@ -123,49 +127,65 @@ def main():
             with open(os.path.join(testcases_dir, "1.data"), 'w') as f:
                 f.write(content)
         except Exception as e:
-            print(f"\033[91m[FAIL] {folder}: Failed to copy .rx: {e}\033[0m")
+            elapsed = time.time() - start_time
+            total_test_time += elapsed
+            print(f"\033[91m[FAIL] {folder}: Failed to copy .rx: {e} ({elapsed:.2f}s)\033[0m")
             continue
 
         # Run ./ir_test
         success, stdout, stderr = run_command("./ir_test", cwd=base_dir, timeout=5)
         if not success:
-            print(f"\033[91m[FAIL] {folder}: ir_test failed: {stderr}\033[0m")
+            elapsed = time.time() - start_time
+            total_test_time += elapsed
+            print(f"\033[91m[FAIL] {folder}: ir_test failed: {stderr} ({elapsed:.2f}s)\033[0m")
             continue
 
         # Copy testcases/1.out to testcases/1.ll
         try:
             shutil.copy(os.path.join(testcases_dir, "1.out"), os.path.join(testcases_dir, "1.ll"))
         except Exception as e:
-            print(f"\033[91m[FAIL] {folder}: Failed to copy .out to .ll: {e}\033[0m")
+            elapsed = time.time() - start_time
+            total_test_time += elapsed
+            print(f"\033[91m[FAIL] {folder}: Failed to copy .out to .ll: {e} ({elapsed:.2f}s)\033[0m")
             continue
 
         # Run clang with -O0 for faster compilation
         success, stdout, stderr = run_command(f"clang -O0 {os.path.join(testcases_dir, '1.ll')} -o {os.path.join(testcases_dir, '1')}", timeout=3600)
         if not success:
-            print(f"\033[91m[FAIL] {folder}: clang failed: {stderr}\033[0m")
+            elapsed = time.time() - start_time
+            total_test_time += elapsed
+            print(f"\033[91m[FAIL] {folder}: clang failed: {stderr} ({elapsed:.2f}s)\033[0m")
             continue
 
         # Run the executable with .in as input
         try:
             with open(in_file, 'r') as f:
                 input_data = f.read()
-            success, stdout, stderr = run_command(f"./{os.path.join(testcases_dir, '1')}", cwd=base_dir, timeout=3600, input=input_data)
+            success, stdout, stderr = run_command(f"ulimit -s unlimited && ./{os.path.join(testcases_dir, '1')}", cwd=base_dir, timeout=3600, input=input_data)
             if not success:
-                print(f"\033[91m[FAIL] {folder}: Executable failed: {stderr}\033[0m")
+                elapsed = time.time() - start_time
+                total_test_time += elapsed
+                print(f"\033[91m[FAIL] {folder}: Executable failed: {stderr} ({elapsed:.2f}s)\033[0m")
                 continue
             # Read expected output
             with open(out_file, 'r') as f:
                 expected = f.read().strip()
             actual = stdout.strip()
             if actual == expected:
-                print(f"\033[92m[PASS] {folder}\033[0m")
+                elapsed = time.time() - start_time
+                total_test_time += elapsed
+                print(f"\033[92m[PASS] {folder} ({elapsed:.2f}s)\033[0m")
                 passed += 1
             else:
-                print(f"\033[91m[FAIL] {folder}: Output mismatch\033[0m")
+                elapsed = time.time() - start_time
+                total_test_time += elapsed
+                print(f"\033[91m[FAIL] {folder}: Output mismatch ({elapsed:.2f}s)\033[0m")
         except Exception as e:
-            print(f"\033[91m[FAIL] {folder}: Execution error: {e}\033[0m")
+            elapsed = time.time() - start_time
+            total_test_time += elapsed
+            print(f"\033[91m[FAIL] {folder}: Execution error: {e} ({elapsed:.2f}s)\033[0m")
 
     print(f"\nPassed: {passed}/{total}")
-    print(f"Total execution time: {time.time() - start_time:.2f} seconds")
+    print(f"Total execution time: {total_test_time:.2f} seconds")
 if __name__ == "__main__":
     main()
