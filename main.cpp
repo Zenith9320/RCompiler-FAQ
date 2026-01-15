@@ -29,7 +29,7 @@ int main() {
 
         if (!semantic_ok) {
             //std::cout << "return 0" << std::endl;
-            return 0;
+            return 1;
         }
 
         // 生成IR
@@ -44,5 +44,5 @@ int main() {
     }
 
     //std::cout << "return 1" << std::endl;
-    return 1;
+    return 0;
 }
