@@ -28,7 +28,7 @@ int main() {
         bool semantic_ok = checker.check();
 
         if (!semantic_ok) {
-            //std::cout << -1 << std::endl;
+            //std::cout << "return 0" << std::endl;
             return 0;
         }
 
@@ -37,11 +37,12 @@ int main() {
         std::string irCode = generator.generate(ast);
 
         // 输出IR
-        std::cout << irCode;
+        if (semantic_ok) std::cout << irCode;
 
     } catch (const std::exception& e) {
         return 0;
     }
 
+    //std::cout << "return 1" << std::endl;
     return 1;
 }
