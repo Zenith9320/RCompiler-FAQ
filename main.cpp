@@ -28,10 +28,10 @@ int main() {
         bool semantic_ok = checker.check();
 
         if (!semantic_ok) {
-            std::cout << -1 << std::endl;
+            //std::cout << -1 << std::endl;
             return 0;
         } else {
-            std::cout << 0 << std::endl;
+            //std::cout << 0 << std::endl;
         }
 
         // 生成IR
