@@ -30,8 +30,6 @@ int main() {
         if (!semantic_ok) {
             //std::cout << -1 << std::endl;
             return 0;
-        } else {
-            std::cout << 1 << std::endl;
         }
 
         // 生成IR
@@ -42,9 +40,8 @@ int main() {
         std::cout << irCode;
 
     } catch (const std::exception& e) {
-        std::cout << -1 << std::endl;
-        return 1;
+        return 0;
     }
 
-    return 0;
+    return 1;
 }
