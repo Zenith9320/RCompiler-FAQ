@@ -517,7 +517,7 @@ std::string IRGenerator::visit(LiteralExpressionNode* node) {
     std::string globalName = ".str." + std::to_string(tempCounter++);
     irStream << "@" << globalName << " = private unnamed_addr constant [" << len << " x i8] c\"" << escaped << "\", align 1\n";
     std::string temp = createTemp();
-    irStream << "  %" << temp << " = getelementptr inbounds [" << len << " x i8], [" << len << " x i8]* @" << globalName << ", i32 0, i32 0\n";
+    irStream << "  %" << temp << " = getelementptr [" << len << " x i8], [" << len << " x i8]* @" << globalName << ", i32 0, i32 0\n";
     return "%" + temp;
   } else if (std::holds_alternative<std::unique_ptr<bool>>(node->literal)) {
     auto& boolLit = std::get<std::unique_ptr<bool>>(node->literal);
@@ -2505,8 +2505,6 @@ void IRGenerator::visit(LetStatement* node) {
     irStream << "  %" << temp << " = alloca " << expandStructType(type) << "\n";
   }
   if (node->expression) {
-  // 检查 rhs 是否是 if expression
-    // 普通 rhs
     std::string value = visit_in_rhs(node->expression.get());
     std::string rhsType = getLhsType(node->expression.get());
     if (type == "i64" && rhsType == "i32") {

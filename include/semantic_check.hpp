@@ -3074,6 +3074,15 @@ class semantic_checker {
         else if constexpr (std::is_same_v<T, std::unique_ptr<NegationExpressionNode>>) {
           return getExpressionType(node_ptr->expression.get());
         }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<DereferenceExpressionNode>>) {
+          return getExpressionType(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<IndexExpressionNode>>) {
+          return getExpressionType(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<ComparisonExpressionNode>>) {
+          return getExpressionType(node_ptr.get());
+        }
       }, ewb->expr);
     } else if (auto* call = dynamic_cast<CallExpressionNode*>(expr)) {
       std::cout << "getting callexpression" << std::endl;
@@ -3678,6 +3687,15 @@ class semantic_checker {
         }
         else if constexpr (std::is_same_v<T, std::unique_ptr<NegationExpressionNode>>) {
           return getExpressionType(node_ptr->expression.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<DereferenceExpressionNode>>) {
+          return getExpressionType(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<IndexExpressionNode>>) {
+          return getExpressionType(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<ComparisonExpressionNode>>) {
+          return getExpressionType(node_ptr.get());
         }
       }, ewb->expr);
     } else if (auto* call = dynamic_cast<CallExpressionNode*>(expr)) {
@@ -4587,6 +4605,15 @@ class semantic_checker {
         }
         else if constexpr (std::is_same_v<T, std::unique_ptr<NegationExpressionNode>>) {
           return check_expression(node_ptr->expression.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<IndexExpressionNode>>) {
+          return check_expression(node_ptr.get());
+        }
+        else if constexpr (std::is_same_v<T, std::unique_ptr<DereferenceExpressionNode>>) {
+          return check_expression(node_ptr.get());
+        }
+        else {
+          return true;
         }
       }, ewb->expr);
     } else if (auto *d = dynamic_cast<const PredicateLoopExpressionNode*>(expr)) {
