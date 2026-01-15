@@ -24,10 +24,6 @@ $(TARGET): $(OBJS)
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) $(BOOST_INCLUDE) -c $< -o $@
 
-# 运行目标
-run: $(TARGET)
-	./$(TARGET)
-
 # 清理
 clean:
 	rm -f $(OBJS) $(TARGET)
