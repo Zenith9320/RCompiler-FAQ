@@ -31,7 +31,7 @@ int main() {
             //std::cout << -1 << std::endl;
             return 0;
         } else {
-            //std::cout << 0 << std::endl;
+            std::cout << 1 << std::endl;
         }
 
         // 生成IR
