@@ -15,7 +15,3 @@ add_executable(code
 
 # 包含目录
 target_include_directories(code PRIVATE include)
-
-# 如果需要链接库（如boost）
-find_package(Boost COMPONENTS regex REQUIRED)
-target_link_libraries(code PRIVATE Boost::regex)
