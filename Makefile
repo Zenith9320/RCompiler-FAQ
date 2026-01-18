@@ -4,7 +4,7 @@ build:
 	@mkdir -p build
 	@cd build && cmake .. && cmake --build .
 
-run:
+run: build
 	@./build/code
 
 clean:
