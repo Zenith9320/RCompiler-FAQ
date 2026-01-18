@@ -27,10 +27,6 @@ int main() {
         try {
             irCode = generator.generate(ast);
         } catch (const std::exception& e) {
-            // 如果生成过程中出错，输出已经生成的IR
-            irCode = generator.getCurrentIR();
-            std::cout << irCode;
-            std::cout << "Error: " << e.what() << std::endl;
             return 1;
         }
 
@@ -38,7 +34,6 @@ int main() {
         std::cout << irCode;
 
     } catch (const std::exception& e) {
-        std::cout << "Error: " << e.what() << std::endl;
         return 1;
     }
 
