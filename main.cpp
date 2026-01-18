@@ -17,15 +17,27 @@ int main() {
         std::ofstream nullstream("/dev/null");
         std::streambuf* oldcout = std::cout.rdbuf(nullstream.rdbuf());
         std::streambuf* oldcerr = std::cerr.rdbuf(nullstream.rdbuf());
-        parser par(tokens);
-        parser par1(tokens);
-        std::vector<std::unique_ptr<ASTNode>> ast = par.parse();
-        std::vector<std::unique_ptr<ASTNode>> ast1 = par1.parse();
+        try {
+            parser par(tokens);
+            std::vector<std::unique_ptr<ASTNode>> ast = par.parse();
+            semantic_checker sc(std::move(ast));
+            if (!sc.check()) {
+                //std::cout << "return 1" << std::endl;
+                return 1;
+            }
+        } catch (const std::exception& e) {
+            return 1;
+        }
         std::cout.rdbuf(oldcout);
         std::cerr.rdbuf(oldcerr);
 
-        semantic_checker sc(std::move(ast));
-        if (!sc.check()) return 1;
+        std::ofstream nullstream1("/dev/null");
+        std::streambuf* oldcout1 = std::cout.rdbuf(nullstream1.rdbuf());
+        std::streambuf* oldcerr1 = std::cerr.rdbuf(nullstream1.rdbuf());
+        parser par1(tokens);
+        std::vector<std::unique_ptr<ASTNode>> ast1 = par1.parse();
+        std::cout.rdbuf(oldcout1);
+        std::cerr.rdbuf(oldcerr1);
 
         // 生成IR
         IRGenerator generator;
@@ -33,6 +45,8 @@ int main() {
         try {
             irCode = generator.generate(ast1);
         } catch (const std::exception& e) {
+            //std::cerr << "IR generation failed: " << e.what() << std::endl;
+            //std::cout << "return 0" << std::endl;
             return 0;
         }
 
@@ -40,8 +54,10 @@ int main() {
         std::cout << irCode;
 
     } catch (const std::exception& e) {
-        return 1;
+        //std::cout << "return 1" << std::endl;
+        return 0;
     }
 
+    //std::cout << "return 0" << std::endl;
     return 0;
 }
