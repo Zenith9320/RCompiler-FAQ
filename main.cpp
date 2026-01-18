@@ -24,12 +24,12 @@ int main() {
         std::vector<std::unique_ptr<ASTNode>> ast = par.parse();
 
         // 语义检查
-        semantic_checker checker(std::move(ast));
-        bool semantic_ok = checker.check();
+        //semantic_checker checker(std::move(ast));
+        //bool semantic_ok = checker.check();
 
-        if (!semantic_ok) {
-            return 1;
-        }
+        //if (!semantic_ok) {
+        //    return 1;
+        //}
 
         // 生成IR
         IRGenerator generator;
@@ -42,5 +42,5 @@ int main() {
         return 1;
     }
 
-    return 1;
+    return 0;
 }
