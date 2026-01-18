@@ -4,6 +4,7 @@
 #include <vector>
 #include <string>
 #include "include/ir.hpp"
+#include "include/semantic_check.hpp"
 
 int main() {
     std::string source((std::istreambuf_iterator<char>(std::cin)),std::istreambuf_iterator<char>());
@@ -22,7 +23,7 @@ int main() {
         std::cerr.rdbuf(oldcerr);
 
         semantic_checker sc(std::move(ast));
-        if (!sc.check()) return 1
+        if (!sc.check()) return 1;
 
         // 生成IR
         IRGenerator generator;
