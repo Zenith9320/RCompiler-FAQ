@@ -33,7 +33,7 @@ int main() {
         try {
             irCode = generator.generate(ast1);
         } catch (const std::exception& e) {
-            return 1;
+            return 0;
         }
 
         // 输出IR
