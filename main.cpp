@@ -14,33 +14,5 @@ int main() {
         source += line + "\n";
     }
 
-    try {
-        // 词法分析
-        lexer lex(source);
-        std::vector<Token> tokens = lex.tokenize();
-
-        // 语法分析
-        parser par(tokens);
-        std::vector<std::unique_ptr<ASTNode>> ast = par.parse();
-
-        // 语义检查
-        //semantic_checker checker(std::move(ast));
-        //bool semantic_ok = checker.check();
-
-        //if (!semantic_ok) {
-        //    return 1;
-        //}
-
-        // 生成IR
-        IRGenerator generator;
-        std::string irCode = generator.generate(ast);
-
-        // 输出IR
-        std::cout << irCode;
-
-    } catch (const std::exception& e) {
-        return 0;
-    }
-
     return 0;
 }
