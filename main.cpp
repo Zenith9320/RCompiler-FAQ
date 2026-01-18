@@ -28,7 +28,7 @@ int main() {
         bool semantic_ok = checker.check();
 
         if (!semantic_ok) {
-            return 0;
+            return 1;
         }
 
         // 生成IR
@@ -39,8 +39,8 @@ int main() {
         std::cout << irCode;
 
     } catch (const std::exception& e) {
-        return 0;
+        return 1;
     }
 
-    return 0;
+    return 1;
 }
