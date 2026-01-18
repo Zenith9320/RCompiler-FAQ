@@ -21,6 +21,9 @@ int main() {
         std::cout.rdbuf(oldcout);
         std::cerr.rdbuf(oldcerr);
 
+        semantic_checker sc(std::move(ast));
+        if (!sc.check()) return 1
+
         // 生成IR
         IRGenerator generator;
         std::string irCode;
