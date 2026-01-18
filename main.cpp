@@ -22,14 +22,13 @@ int main() {
         std::cout.rdbuf(oldcout);
         std::cerr.rdbuf(oldcerr);
 
-        semantic_checker sc(std::move(ast));
-        if (!sc.check()) return 1;
-
+        parser par1(tokens);
+        std::vector<std::unique_ptr<ASTNode>> ast1 = par1.parse();
         // 生成IR
         IRGenerator generator;
         std::string irCode;
         try {
-            irCode = generator.generate(ast);
+            irCode = generator.generate(std::move(ast1));
         } catch (const std::exception& e) {
             return 1;
         }
