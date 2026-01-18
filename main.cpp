@@ -14,5 +14,5 @@ int main() {
         source += line + "\n";
     }
 
-    return 0;
+    return -1;
 }
