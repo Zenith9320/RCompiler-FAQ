@@ -807,6 +807,8 @@ class semantic_checker {
           return getExpressionType(node_ptr.get())->toString();
         } else if constexpr (std::is_same_v<T, std::unique_ptr<PathExpressionNode>>) {
           return getExpressionType(node_ptr.get())->toString();
+        } else if constexpr (std::is_same_v<T, std::unique_ptr<ComparisonExpressionNode>>) {
+          return "bool";
         } else if constexpr (std::is_same_v<T, std::unique_ptr<DereferenceExpressionNode>>) {
           if (auto* path = dynamic_cast<PathExpressionNode*>(node_ptr->expression.get())) {
             //std::cout << "path in dereferenceexpression: " << path->toString() << std::endl;
@@ -827,6 +829,7 @@ class semantic_checker {
             return "";
           }
         } else {
+          //std::cout << "unknown type in expressionwithoutblock:" << typeid(T).name() << std::endl;
           return "";
         }
       }, expr_node->expr);
@@ -1005,6 +1008,8 @@ class semantic_checker {
             return "";
           }
           return getExpressionType(node_ptr->expression.get())->toString();
+        } else if constexpr (std::is_same_v<T, std::unique_ptr<ComparisonExpressionNode>>) {
+          return "bool";
         } else if constexpr (std::is_same_v<T, std::unique_ptr<DereferenceExpressionNode>>) {
           if (auto* path = dynamic_cast<PathExpressionNode*>(node_ptr->expression.get())) {
             //std::cout << "path in dereferenceexpression: " << path->toString() << std::endl;
@@ -1025,7 +1030,7 @@ class semantic_checker {
             return "";
           }
         } else {
-          //std::cout << "unknown type of expression without block" << std::endl;
+          //std::cout << "unknown type in expressionwithoutblock:" << typeid(T).name() << std::endl;
           return "";
         }
       }, expr_node->expr);
@@ -1194,6 +1199,8 @@ class semantic_checker {
           }
         } else if constexpr (std::is_same_v<T, std::unique_ptr<LiteralExpressionNode>>) {
           return getExpressionType(node_ptr.get())->toString();
+        } else if constexpr (std::is_same_v<T, std::unique_ptr<ComparisonExpressionNode>>) {
+          return "bool";
         } else if constexpr (std::is_same_v<T, std::unique_ptr<TypeCastExpressionNode>>) {
           return node_ptr->type->toString();
         } else if constexpr (std::is_same_v<T, std::unique_ptr<FieldExpressionNode>>) {
@@ -1226,7 +1233,7 @@ class semantic_checker {
             return "";
           }
         } else {
-          //std::cout << "unknown type of expression without block" << std::endl;
+          //std::cout << "unknown type in expressionwithoutblock:" << typeid(T).name() << std::endl;
           return "";
         }
       }, expr_node->expr);
