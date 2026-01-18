@@ -6,3 +6,6 @@ build:
 
 run:
 	@./build/code
+
+clean:
+	@rm -rf build
