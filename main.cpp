@@ -18,12 +18,12 @@ int main() {
         std::streambuf* oldcout = std::cout.rdbuf(nullstream.rdbuf());
         std::streambuf* oldcerr = std::cerr.rdbuf(nullstream.rdbuf());
         parser par(tokens);
+        parser par1(tokens);
         std::vector<std::unique_ptr<ASTNode>> ast = par.parse();
+        std::vector<std::unique_ptr<ASTNode>> ast1 = par1.parse();
         std::cout.rdbuf(oldcout);
         std::cerr.rdbuf(oldcerr);
 
-        parser par1(tokens);
-        std::vector<std::unique_ptr<ASTNode>> ast1 = par1.parse();
         // 生成IR
         IRGenerator generator;
         std::string irCode;
