@@ -24,11 +24,14 @@ int main() {
         std::cout.rdbuf(oldcout);
         std::cerr.rdbuf(oldcerr);
 
+        semantic_checker sc(std::move(ast));
+        if (!sc.check()) return 1;
+
         // 生成IR
         IRGenerator generator;
         std::string irCode;
         try {
-            irCode = generator.generate(std::move(ast1));
+            irCode = generator.generate(ast1);
         } catch (const std::exception& e) {
             return 1;
         }
