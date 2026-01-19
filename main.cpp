@@ -17,36 +17,44 @@ int main() {
         std::ofstream nullstream("/dev/null");
         std::streambuf* oldcout = std::cout.rdbuf(nullstream.rdbuf());
         std::streambuf* oldcerr = std::cerr.rdbuf(nullstream.rdbuf());
+        parser par(tokens);
+        std::vector<std::unique_ptr<ASTNode>> ast;
         try {
-            parser par(tokens);
-            std::vector<std::unique_ptr<ASTNode>> ast = par.parse();
-            semantic_checker sc(std::move(ast));
-            if (!sc.check()) {
-                //std::cout << "return 1" << std::endl;
-                return 1;
-            }
+            ast = par.parse();
         } catch (const std::exception& e) {
+            std::cout.rdbuf(oldcout);
+            std::cerr.rdbuf(oldcerr);
             return 1;
         }
         std::cout.rdbuf(oldcout);
         std::cerr.rdbuf(oldcerr);
 
+        semantic_checker sc(std::move(ast));
+        if (!sc.check()) {
+            //std::cout << "Semantic error" << std::endl;
+            return 1;
+        }
+
         std::ofstream nullstream1("/dev/null");
         std::streambuf* oldcout1 = std::cout.rdbuf(nullstream1.rdbuf());
         std::streambuf* oldcerr1 = std::cerr.rdbuf(nullstream1.rdbuf());
         parser par1(tokens);
-        std::vector<std::unique_ptr<ASTNode>> ast1 = par1.parse();
+        std::vector<std::unique_ptr<ASTNode>> ast1;
+        try {
+            ast1 = par1.parse();
+        } catch (const std::exception& e) {
+            std::cout.rdbuf(oldcout1);
+            std::cerr.rdbuf(oldcerr1);
+            return 1;
+        }
         std::cout.rdbuf(oldcout1);
         std::cerr.rdbuf(oldcerr1);
-
         // 生成IR
         IRGenerator generator;
         std::string irCode;
         try {
-            irCode = generator.generate(ast1);
+            irCode = generator.generate(std::move(ast1));
         } catch (const std::exception& e) {
-            //std::cerr << "IR generation failed: " << e.what() << std::endl;
-            //std::cout << "return 0" << std::endl;
             return 0;
         }
 
@@ -54,10 +62,8 @@ int main() {
         std::cout << irCode;
 
     } catch (const std::exception& e) {
-        //std::cout << "return 1" << std::endl;
-        return 0;
+        return 1;
     }
 
-    //std::cout << "return 0" << std::endl;
     return 0;
 }
