@@ -7,6 +7,8 @@
 #include "include/semantic_check.hpp"
 
 int main() {
+    std::ofstream nullstream("/dev/null");
+    std::streambuf* oldcerr = std::cerr.rdbuf(nullstream.rdbuf());
     std::string source((std::istreambuf_iterator<char>(std::cin)),std::istreambuf_iterator<char>());
     try {
         // 词法分析
@@ -14,9 +16,7 @@ int main() {
         std::vector<Token> tokens = lex.tokenize();
 
         // 语法分析 - 禁止输出
-        std::ofstream nullstream("/dev/null");
         std::streambuf* oldcout = std::cout.rdbuf(nullstream.rdbuf());
-        std::streambuf* oldcerr = std::cerr.rdbuf(nullstream.rdbuf());
         parser par(tokens);
         std::vector<std::unique_ptr<ASTNode>> ast;
         try {
@@ -26,8 +26,6 @@ int main() {
             std::cerr.rdbuf(oldcerr);
             return 1;
         }
-        std::cout.rdbuf(oldcout);
-        std::cerr.rdbuf(oldcerr);
 
         semantic_checker sc(std::move(ast));
         if (!sc.check()) {
@@ -35,20 +33,14 @@ int main() {
             return 1;
         }
 
-        std::ofstream nullstream1("/dev/null");
-        std::streambuf* oldcout1 = std::cout.rdbuf(nullstream1.rdbuf());
-        std::streambuf* oldcerr1 = std::cerr.rdbuf(nullstream1.rdbuf());
         parser par1(tokens);
         std::vector<std::unique_ptr<ASTNode>> ast1;
         try {
             ast1 = par1.parse();
         } catch (const std::exception& e) {
-            std::cout.rdbuf(oldcout1);
-            std::cerr.rdbuf(oldcerr1);
             return 0;
         }
-        std::cout.rdbuf(oldcout1);
-        std::cerr.rdbuf(oldcerr1);
+        std::cout.rdbuf(oldcout);
         // 生成IR
         IRGenerator generator;
         std::string irCode;
@@ -64,5 +56,6 @@ int main() {
         return 1;
     }
 
+    std::cerr.rdbuf(oldcerr);
     return 0;
 }
