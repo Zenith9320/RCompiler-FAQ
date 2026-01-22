@@ -53,7 +53,7 @@ int main() {
         std::cout << irCode;
 
     } catch (const std::exception& e) {
-        return 1;
+        return 0;
     }
 
     std::cerr.rdbuf(oldcerr);
